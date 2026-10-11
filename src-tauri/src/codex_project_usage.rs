@@ -2057,6 +2057,39 @@ mod tests {
         result
     }
     #[test]
+    fn standalone_sessions_collect_tokens_without_tokei_or_sync() {
+        let home = metadata_fixture_dir("standalone");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        fs::create_dir_all(codex.join("archived_sessions")).unwrap();
+        fs::write(
+            codex.join("sessions/synthetic.jsonl"),
+            format!("{CONTEXT}\n{FIRST}\n{SECOND}\n"),
+        )
+        .unwrap();
+        let snapshot = collect_increment(&home, &codex, &mut Index::default());
+        assert_eq!(snapshot.scanned_files, 1);
+        assert_eq!(snapshot.device_id, None);
+        assert!(snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning == "device_identity_unavailable"));
+        assert_eq!(
+            snapshot
+                .projects
+                .iter()
+                .flat_map(|project| project.daily.values())
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>(),
+            170
+        );
+        assert!(!home.join(".tokei").exists());
+        assert!(!home.join("cloud-sync.json").exists());
+        assert!(!home.join("usage-sync-local.json").exists());
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("SECRET"));
+        fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
     fn reversed_parent_and_fork_file_order_has_stable_self_attribution() {
         let parent_first = collect_replay_fixture("a-parent.jsonl", "z-fork.jsonl");
         let fork_first = collect_replay_fixture("z-parent.jsonl", "a-fork.jsonl");

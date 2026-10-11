@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { aggregateGroupUsage, canonicalModelId, createUsagePreview, formatTokens, periodStart, validateGroupSettings, withLiveLocalUsage, type ProjectUsageSnapshot } from "./tokeiUsage";
+import { aggregateGlobalUsage, aggregateGroupUsage, canonicalModelId, createUsagePreview, formatTokens, LOCAL_CODEX_DEVICE_ID, periodStart, validateGroupSettings, withLiveLocalUsage, type ProjectUsageSnapshot } from "./tokeiUsage";
 
 const now = new Date(2026, 8, 10, 12);
 
 describe("personal Codex usage", () => {
+  it("inserts a virtual standalone ledger once and preserves it during a partial rescan", () => {
+    const preview = createUsagePreview(now);
+    const data = { ...preview, devices: [], groups: [], defaultGroupId: null, localGroupId: null, status: "unavailable" as const, warnings: ["config_unavailable", "sync_unavailable"] };
+    const projects: ProjectUsageSnapshot = {
+      deviceId: LOCAL_CODEX_DEVICE_ID, updatedAt: preview.fetchedAt, status: "ready", coverage: "local",
+      scannedFiles: 1, pricingSource: "builtin", pricingUpdatedAt: null, warnings: [],
+      projects: [{ id: "one", name: "One", daily: preview.devices[0].daily }],
+    };
+    const merged = withLiveLocalUsage(data, projects);
+    expect(aggregateGlobalUsage(merged, "all", now).totalTokens).toBe(2_000_000);
+    expect(merged.devices).toHaveLength(1);
+    expect(withLiveLocalUsage(merged, projects)).toBe(merged);
+    expect(withLiveLocalUsage(merged, { ...projects, updatedAt: "2026-09-10T12:00:00Z", status: "partial", warnings: ["scan_limit"] })).toBe(merged);
+    expect(data.devices).toEqual([]);
+    expect(data.groups).toEqual([]);
+    expect(merged.groups).toEqual([]);
+    expect(withLiveLocalUsage(data, { ...projects, status: "unavailable" })).toBe(data);
+  });
   it("uses a newer live local scan for both model and task-era cost, without changing peers", () => {
     const data = createUsagePreview(now);
     const local = data.devices[0];

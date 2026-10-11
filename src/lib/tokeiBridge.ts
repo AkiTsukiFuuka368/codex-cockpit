@@ -1,7 +1,8 @@
 import { isTauri } from "./bridge";
-import { createUsagePreview, validateGroupSettings, type DailyModelUsage, type ProjectUsageSnapshot, type TokeiGroupSettings, type TokeiUsage, type UsageMetrics } from "./tokeiUsage";
+import { createUsagePreview, LOCAL_CODEX_DEVICE_ID, validateGroupSettings, withLiveLocalUsage, type DailyModelUsage, type ProjectUsageSnapshot, type TokeiGroupSettings, type TokeiUsage, type UsageMetrics } from "./tokeiUsage";
 
 let previewSettings: TokeiGroupSettings | null = null;
+let pendingProjectUsage: Promise<ProjectUsageSnapshot> | null = null;
 
 export async function getProjectUsage(): Promise<ProjectUsageSnapshot> {
   if (!isTauri()) {
@@ -15,8 +16,16 @@ export async function getProjectUsage(): Promise<ProjectUsageSnapshot> {
       { id: "demo-fork", name: "比较另一个设计方案", projectName: "示例项目", parentId: "demo-root", rootId: "demo-fork", relation: "fork", daily: scaledDaily(.5) },
     ] };
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<ProjectUsageSnapshot>("get_codex_project_usage");
+  // Aggregate and task readers share the native collector's single flight.
+  if (!pendingProjectUsage) pendingProjectUsage = (async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const snapshot = await invoke<ProjectUsageSnapshot>("get_codex_project_usage");
+    if (snapshot.deviceId) return snapshot;
+    const warnings = snapshot.warnings.filter(warning => warning !== "device_identity_unavailable");
+    return { ...snapshot, deviceId: LOCAL_CODEX_DEVICE_ID, warnings,
+      status: snapshot.status === "partial" && warnings.every(warning => warning.startsWith("task_metadata_")) ? "ready" : snapshot.status };
+  })().finally(() => { pendingProjectUsage = null; });
+  return pendingProjectUsage;
 }
 
 export async function getTokeiUsage(): Promise<TokeiUsage> {
@@ -26,7 +35,13 @@ export async function getTokeiUsage(): Promise<TokeiUsage> {
     return usage;
   }
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<TokeiUsage>("get_tokei_usage");
+  const usage = await invoke<TokeiUsage>("get_tokei_usage");
+  if (!usage.warnings.includes("config_unavailable")) return usage;
+  const projects = await getProjectUsage().catch((reason: unknown) => {
+    if (!usage.devices.length) throw reason;
+    return null;
+  });
+  return projects?.deviceId === LOCAL_CODEX_DEVICE_ID ? withLiveLocalUsage(usage, projects) : usage;
 }
 
 export async function saveTokeiGroups(settings: TokeiGroupSettings, expected: TokeiGroupSettings): Promise<TokeiGroupSettings> {

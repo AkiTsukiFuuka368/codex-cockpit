@@ -89,13 +89,17 @@ export interface ProjectUsageSnapshot {
   warnings: string[];
 }
 
+/** In-memory identity for local-only reads; never persisted or used for sync. */
+export const LOCAL_CODEX_DEVICE_ID = "__local_codex";
+
 /** Keep the local model ledger on the same scan as task details; peer snapshots stay untouched. */
 export function withLiveLocalUsage(data: TokeiUsage, projects: ProjectUsageSnapshot | null): TokeiUsage {
   // The incremental collector returns a newer timestamp even while it is still
   // scanning history. Never replace a complete device ledger with that prefix.
-  if (!projects?.deviceId || projects.status === "unavailable" || projects.warnings.includes("scan_limit") || !projects.projects.length) return data;
+  if (!projects?.deviceId || projects.status === "unavailable" || !projects.projects.length) return data;
   const existing = data.devices.find(device => device.id === projects.deviceId);
-  if (!existing || Date.parse(projects.updatedAt) <= Date.parse(existing.updatedAt ?? "")) return data;
+  const standalone = !existing && projects.deviceId === LOCAL_CODEX_DEVICE_ID;
+  if (!standalone && (!existing || projects.warnings.includes("scan_limit") || Date.parse(projects.updatedAt) <= Date.parse(existing.updatedAt ?? ""))) return data;
   const daily = new Map<string, DailyModelUsage>();
   for (const project of projects.projects) for (const [date, source] of Object.entries(project.daily)) {
     const target = daily.get(date) ?? { ...ZERO, models: [] };
@@ -106,6 +110,12 @@ export function withLiveLocalUsage(data: TokeiUsage, projects: ProjectUsageSnaps
     daily.set(date, target);
   }
   if (!daily.size) return data;
+  if (standalone) {
+    const warnings = [...new Set([...data.warnings.filter(warning => warning !== "config_unavailable" && warning !== "sync_unavailable"), ...projects.warnings])];
+    return { ...data, warnings, status: projects.status === "ready" && !warnings.length ? "ready" : "partial",
+      devices: [...data.devices, { id: projects.deviceId, updatedAt: projects.updatedAt, stale: false,
+        collectionPartial: projects.status !== "ready", liveLocal: true, daily: Object.fromEntries(daily), ranges: {} }] };
+  }
   return { ...data, devices: data.devices.map(device => device.id === projects.deviceId ? {
     ...device, updatedAt: projects.updatedAt, stale: false, collectionPartial: projects.status !== "ready",
     liveLocal: true, daily: { ...device.daily, ...Object.fromEntries(daily) },

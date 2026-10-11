@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { aggregateGroupUsage, createUsagePreview } from "../lib/tokeiUsage";
+import { aggregateGroupUsage, createUsagePreview, LOCAL_CODEX_DEVICE_ID, withLiveLocalUsage } from "../lib/tokeiUsage";
 import { getProjectUsage, getTokeiUsage, saveTokeiGroups } from "../lib/tokeiBridge";
 import { CodexUsagePanel } from "./CodexUsagePanel";
 
@@ -30,6 +30,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("quiet Codex usage view", () => {
+  it("shows standalone local tasks and models in the default global scope", async () => {
+    const data = createUsagePreview();
+    const source = await getProjectUsage();
+    source.deviceId = LOCAL_CODEX_DEVICE_ID;
+    source.status = "ready";
+    Object.assign(data, { devices: [], groups: [], defaultGroupId: null, localGroupId: null, status: "unavailable", warnings: ["config_unavailable", "sync_unavailable"] });
+    vi.mocked(getTokeiUsage).mockResolvedValue(withLiveLocalUsage(data, source));
+    vi.mocked(getProjectUsage).mockResolvedValue(source);
+    render(<CodexUsagePanel zh />);
+    await screen.findByText("Local task");
+    expect(screen.getByRole("combobox", { name: "用量分组" })).toHaveValue("global");
+    fireEvent.change(screen.getByRole("combobox", { name: "查看方式" }), { target: { value: "models" } });
+    expect(screen.getByText("Model A")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "模型用量占比" }).parentElement).toHaveTextContent("200万");
+  });
   it("opens this device's member rather than another device's shared default", async () => {
     const data = createUsagePreview();
     data.groups.push({ id: "other", name: "Other member", deviceIds: ["Other PC"] });
