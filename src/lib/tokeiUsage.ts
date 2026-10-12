@@ -89,7 +89,7 @@ export interface ProjectUsageSnapshot {
   warnings: string[];
 }
 
-/** In-memory identity for local-only reads; never persisted or used for sync. */
+/** Fallback for local-only reads; member settings may refer to it, without enabling sync. */
 export const LOCAL_CODEX_DEVICE_ID = "__local_codex";
 
 /** Keep the local model ledger on the same scan as task details; peer snapshots stay untouched. */
@@ -97,8 +97,10 @@ export function withLiveLocalUsage(data: TokeiUsage, projects: ProjectUsageSnaps
   // The incremental collector returns a newer timestamp even while it is still
   // scanning history. Never replace a complete device ledger with that prefix.
   if (!projects?.deviceId || projects.status === "unavailable" || !projects.projects.length) return data;
+  // A fallback name is not proof that a retained snapshot belongs to this device.
+  if (projects.deviceId === LOCAL_CODEX_DEVICE_ID && data.devices.length && data.warnings.includes("config_unavailable")) return data;
   const existing = data.devices.find(device => device.id === projects.deviceId);
-  const standalone = !existing && projects.deviceId === LOCAL_CODEX_DEVICE_ID;
+  const standalone = !data.devices.length && data.warnings.includes("config_unavailable") && projects.deviceId === LOCAL_CODEX_DEVICE_ID;
   if (!standalone && (!existing || projects.warnings.includes("scan_limit") || Date.parse(projects.updatedAt) <= Date.parse(existing.updatedAt ?? ""))) return data;
   const daily = new Map<string, DailyModelUsage>();
   for (const project of projects.projects) for (const [date, source] of Object.entries(project.daily)) {
@@ -112,7 +114,7 @@ export function withLiveLocalUsage(data: TokeiUsage, projects: ProjectUsageSnaps
   if (!daily.size) return data;
   if (standalone) {
     const warnings = [...new Set([...data.warnings.filter(warning => warning !== "config_unavailable" && warning !== "sync_unavailable"), ...projects.warnings])];
-    return { ...data, warnings, status: projects.status === "ready" && !warnings.length ? "ready" : "partial",
+    return { ...data, warnings, status: projects.status === "ready" && !warnings.some(warning => !warning.startsWith("task_metadata_")) ? "ready" : "partial",
       devices: [...data.devices, { id: projects.deviceId, updatedAt: projects.updatedAt, stale: false,
         collectionPartial: projects.status !== "ready", liveLocal: true, daily: Object.fromEntries(daily), ranges: {} }] };
   }

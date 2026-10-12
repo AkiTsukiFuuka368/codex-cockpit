@@ -656,6 +656,28 @@ mod tests {
         assert_eq!(result.status, "unavailable");
         assert!(result.warnings.contains(&"config_unavailable".to_owned()));
     }
+    #[test]
+    fn retained_snapshot_is_read_even_without_device_configuration() {
+        let f = Fixture::new();
+        let sync = f.0.join(".tokei/sync");
+        fs::create_dir_all(&sync).unwrap();
+        let snapshot = json!({"_device":"Previous-PC","_ts":Utc::now().timestamp(),
+            "_ledger":{"v":1,"tools":{"codex":{"2026-09-10":{"in":150,"cached":100,"out":20}}}}});
+        fs::write(
+            sync.join("Previous-PC.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let result = load_usage(&f.0, imported_groups(&Value::Null));
+        assert!(!f.0.join(".tokei/config.json").exists());
+        assert!(result.warnings.contains(&"config_unavailable".to_owned()));
+        assert_eq!(result.devices.len(), 1);
+        assert_eq!(result.devices[0].id, "Previous-PC");
+        assert_eq!(
+            result.devices[0].daily["2026-09-10"].metrics.total_tokens,
+            170
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn symlink_source_and_settings_rejected() {

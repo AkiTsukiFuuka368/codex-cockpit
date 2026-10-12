@@ -3,6 +3,8 @@ import { createUsagePreview, LOCAL_CODEX_DEVICE_ID, validateGroupSettings, withL
 
 let previewSettings: TokeiGroupSettings | null = null;
 let pendingProjectUsage: Promise<ProjectUsageSnapshot> | null = null;
+// One in-memory baseline for this unconfigured device, not a sync snapshot.
+let lastStandaloneUsage: TokeiUsage | null = null;
 
 export async function getProjectUsage(): Promise<ProjectUsageSnapshot> {
   if (!isTauri()) {
@@ -36,12 +38,22 @@ export async function getTokeiUsage(): Promise<TokeiUsage> {
   }
   const { invoke } = await import("@tauri-apps/api/core");
   const usage = await invoke<TokeiUsage>("get_tokei_usage");
-  if (!usage.warnings.includes("config_unavailable")) return usage;
-  const projects = await getProjectUsage().catch((reason: unknown) => {
-    if (!usage.devices.length) throw reason;
-    return null;
-  });
-  return projects?.deviceId === LOCAL_CODEX_DEVICE_ID ? withLiveLocalUsage(usage, projects) : usage;
+  if (!usage.warnings.includes("config_unavailable") || usage.devices.length) {
+    lastStandaloneUsage = null;
+    return usage;
+  }
+  const projects = await getProjectUsage();
+  if (projects.deviceId !== LOCAL_CODEX_DEVICE_ID) {
+    lastStandaloneUsage = null;
+    return usage;
+  }
+  if (projects.warnings.includes("scan_limit") && lastStandaloneUsage) {
+    // Preserve the completed scan while keeping the latest member settings.
+    return { ...usage, devices: lastStandaloneUsage.devices, warnings: lastStandaloneUsage.warnings, status: lastStandaloneUsage.status };
+  }
+  const merged = withLiveLocalUsage(usage, projects);
+  if (merged.devices.length && !projects.warnings.includes("scan_limit")) lastStandaloneUsage = merged;
+  return merged;
 }
 
 export async function saveTokeiGroups(settings: TokeiGroupSettings, expected: TokeiGroupSettings): Promise<TokeiGroupSettings> {

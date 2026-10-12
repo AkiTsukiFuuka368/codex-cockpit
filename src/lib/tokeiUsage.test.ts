@@ -21,6 +21,12 @@ describe("personal Codex usage", () => {
     expect(data.groups).toEqual([]);
     expect(merged.groups).toEqual([]);
     expect(withLiveLocalUsage(data, { ...projects, status: "unavailable" })).toBe(data);
+    const retained = { ...data, devices: preview.devices };
+    expect(withLiveLocalUsage(retained, projects)).toBe(retained);
+    const sameName = { ...data, devices: [{ ...preview.devices[0], id: LOCAL_CODEX_DEVICE_ID, updatedAt: "2026-09-10T01:00:00Z" }] };
+    expect(withLiveLocalUsage(sameName, projects)).toBe(sameName);
+    const configured = { ...data, warnings: [] };
+    expect(withLiveLocalUsage(configured, projects)).toBe(configured);
   });
   it("uses a newer live local scan for both model and task-era cost, without changing peers", () => {
     const data = createUsagePreview(now);
