@@ -55,3 +55,5 @@ and wrap without dropping values or leaving a percentage on its own line.
 
 System/YaHei/Times/FZ fonts depend on local installation; never bundle proprietary font
 files. Browser checks do not replace macOS and Windows native-window smoke tests.
+
+macOS Dock presence: launch the packaged app from Applications and confirm no Dock icon appears. Open/close the control center through the widget and menu bar, then relaunch and repeat. If tray creation fails, the app must retain its Dock/taskbar fallback so the window remains reachable. Also verify normal Windows tray behavior.
