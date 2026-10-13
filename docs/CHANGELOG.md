@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.3.0-beta.5 - Unreleased
+## 0.3.0 - 2026-10-13
+
+- Publish synchronized Mac universal and Windows x64 packages with signed stable-channel updates.
+- Fit full task/model donut readouts at larger font sizes and keep long trend peak labels within their card.
 
 - Integrate community PR #1 (persistent fonts), #3 (macOS Dock policy) and #4 (standalone local usage), preserving contributor commits and current native device identities.
 - Fresh installations discover local Codex records, create a stable local identity and retain cached usage without requiring Tokei or cloud setup; users can confirm a manually selected directory.
@@ -14,8 +17,7 @@
 - Preserve main's nested snapshot/feedback validation, bounded streaming JSON, Cloudflare rate-limit bindings, single-use 24-hour invitations and owner-confirmed device revocation.
 - Update dependencies and publication/history checks, keep self-hosted opt-in synchronization and signed update channels, and retain the new product homepage and documentation layout.
 
-Source integration does not publish installers, deploy the backend or update the Release feeds.
-Compatibility details: [community PR integration](PR-INTEGRATION-20261012.md).
+Desktop publication does not deploy the backend. Compatibility and verification boundaries: [main/PR integration](INTEGRATION-20261013.md) and [Windows integration](WINDOWS-INTEGRATION.md).
 
 ## 0.3.0-beta.4 - 2026-10-02
 

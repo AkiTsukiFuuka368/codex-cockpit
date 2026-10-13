@@ -1,6 +1,6 @@
 # 开源前最后核对
 
-公开源码、提交推送、打版本标签、发布安装包和部署 Worker 是独立步骤，分别由维护者授权。0.3.0-beta.5 当前是源码候选；不能用 main 的检查结果代替已下载安装包的身份或 GUI 验收。
+公开源码、提交推送、打版本标签、发布安装包和部署 Worker 是独立步骤，分别由维护者授权。本次准备发布 0.3.0 正式版；不能用 main 的检查结果代替已下载安装包的身份或 GUI 验收。
 
 ## 源码与文档
 
@@ -8,7 +8,7 @@
 - 运行完整桌面快速门禁、Worker 测试、版本一致性和 diff 检查。
 - 扫描两个 npm lockfile 和 Cargo.lock；保留真实告警，不用降级、忽略项或删除依赖来伪造零风险。
 - Cloudflare 工具使用 Wrangler 4.148.0，并以 sharp 0.35.5 的补丁版本 override 修复其传递依赖漏洞；每次升级复查兼容性与审计，不长期把 override 当安全保证。
-- 本轮 Cargo.lock 已把 rustls 升至 0.23.45、event-listener 升至 5.4.2。RustSec 仍有 6 项上游 unmaintained 提示（proc-macro-error 与 5 个 UNIC 包）及 GLib 0.18.5 的 unsound 提示。GLib 不在已检查的 Apple Silicon macOS / Windows x64 目标依赖树中，但仍保留在跨平台 lockfile；若以后支持 Linux，必须重新处理，不能照搬当前结论。UNIC 属于 Tauri 的传递依赖，不以未经审查的 fork 或破坏性替换来隐藏告警。
+- Cargo.lock 已把 rustls 升至 0.23.45、event-listener 升至 5.4.2；正式版准备中将 quinn-proto 从 0.11.16 升至 0.11.18，修复审计发现的五项已知漏洞。RustSec 仍有 6 项上游 unmaintained 提示（proc-macro-error 与 5 个 UNIC 包）及 GLib 0.18.5 的 unsound 提示。GLib 不在已检查的 Apple Silicon macOS / Windows x64 目标依赖树中，但仍保留在跨平台 lockfile；若以后支持 Linux，必须重新处理，不能照搬当前结论。UNIC 属于 Tauri 的传递依赖，不以未经审查的 fork 或破坏性替换来隐藏告警。
 - 运行 audit:public 与 audit:history。规则扫描只能找常见模式；人工检查新增图片、提交作者邮箱、外链及许可。
 - 收款码是维护者明确选择的咖啡支持入口，保留。更新公钥不是私钥。MIT、OFL 和上游声明随源码分发；不把供应商品牌当作官方背书。
 - Git 历史有非 noreply 提交邮箱，公开后会可见；由维护者确认接受或另行授权历史重写，不能自动抹除历史。

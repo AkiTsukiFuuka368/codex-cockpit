@@ -3,6 +3,12 @@ import { readFileSync } from "node:fs";
 import { assertVersionSync, buildChangelog, nextVersion, updateCargoManifest } from "./release.mjs";
 
 describe("release automation", () => {
+  it("uses stable update defaults in both frontend and native preferences", () => {
+    const frontend = readFileSync(new URL("../src/lib/preferences.ts", import.meta.url), "utf8");
+    const native = readFileSync(new URL("../src-tauri/src/models.rs", import.meta.url), "utf8");
+    expect(frontend).toContain('updateChannel: "stable"');
+    expect(native).toMatch(/fn default_update_channel\(\) -> String\s*\{\s*"stable"\.into\(\)/);
+  });
   it("keeps the changelog in docs for both reading and release staging", () => {
     const script = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
     expect(script).toContain('resolve(ROOT, "docs", "CHANGELOG.md")');

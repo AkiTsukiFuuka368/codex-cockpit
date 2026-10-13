@@ -251,7 +251,7 @@ async function main() {
   }
   run("git", ["push", "origin", "main"]);
   run("git", ["push", "origin", `v${target}`]);
-  console.log(`Published v${target}. GitHub Actions will verify and build the beta desktop packages.`);
+  console.log(`Published v${target}. GitHub Actions will verify, build and publish both desktop packages.`);
 }
 
 const invokedDirectly = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

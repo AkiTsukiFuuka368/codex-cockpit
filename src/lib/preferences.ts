@@ -44,7 +44,7 @@ export const DEFAULT_WIDGET_PREFERENCES: WidgetPreferences = {
   quietHoursStart: 22,
   quietHoursEnd: 8,
   notificationCooldownMinutes: 120,
-  updateChannel: "beta",
+  updateChannel: "stable",
   automaticUpdates: true,
 };
 

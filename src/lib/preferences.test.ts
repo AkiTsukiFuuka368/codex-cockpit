@@ -3,6 +3,12 @@ import { DEFAULT_WIDGET_PREFERENCES, defaultFontScaleForPlatform, effectiveCompa
 import { UI_FONT_OPTIONS, defaultFontFamilyForPlatform } from "./fonts";
 
 describe("widget preference migration", () => {
+  it("defaults to stable updates without changing an explicit beta preference", () => {
+    expect(DEFAULT_WIDGET_PREFERENCES.updateChannel).toBe("stable");
+    expect(normalizeWidgetPreferences({}).updateChannel).toBe("stable");
+    expect(normalizeWidgetPreferences({ updateChannel: "invalid" as never }).updateChannel).toBe("stable");
+    expect(normalizeWidgetPreferences({ updateChannel: "beta" }).updateChannel).toBe("beta");
+  });
   it("keeps platform defaults for older settings and persists every supported font", () => {
     expect(defaultFontFamilyForPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("system");
     expect(defaultFontFamilyForPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("smiley");
