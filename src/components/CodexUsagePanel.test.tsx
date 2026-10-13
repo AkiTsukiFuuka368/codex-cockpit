@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { aggregateGroupUsage, createUsagePreview } from "../lib/tokeiUsage";
+import { aggregateGroupUsage, createUsagePreview, LOCAL_CODEX_DEVICE_ID, withLiveLocalUsage } from "../lib/tokeiUsage";
 import { getProjectUsage, getTokeiUsage, saveTokeiGroups } from "../lib/tokeiBridge";
 import { CodexUsagePanel } from "./CodexUsagePanel";
 
