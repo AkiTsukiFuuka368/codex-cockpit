@@ -223,6 +223,7 @@ export interface ResetForecast {
   }>;
 }
 
+
 export interface WidgetPreferences {
   codexFocusMode: boolean;
   dailyBudgetPercent: number;

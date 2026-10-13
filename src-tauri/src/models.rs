@@ -400,6 +400,50 @@ mod tests {
     use super::WidgetPreferences;
 
     #[test]
+    fn font_family_defaults_for_existing_preferences_without_changing_font_scale() {
+        let preferences: WidgetPreferences = serde_json::from_str(
+            r#"{"locked":false,"pinnedProvider":null,"autoRotateSeconds":12,"fontScale":1.3}"#,
+        )
+        .expect("legacy preferences should remain readable");
+
+        assert_eq!(preferences.font_family, "smiley");
+        assert_eq!(preferences.font_scale, 1.3);
+        let normalized = preferences.normalized();
+        assert_eq!(normalized.font_family, "smiley");
+        assert_eq!(normalized.font_scale, 1.3);
+    }
+
+    #[test]
+    fn font_family_presets_roundtrip_as_camel_case() {
+        for font_family in ["codex", "yahei", "smiley"] {
+            let preferences = WidgetPreferences {
+                font_family: font_family.into(),
+                font_scale: 1.25,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(preferences.normalized())
+                .expect("preferences should serialize");
+            assert_eq!(json["fontFamily"], font_family);
+            assert!(json.get("font_family").is_none());
+            let restored: WidgetPreferences =
+                serde_json::from_value(json).expect("font preferences should remain readable");
+            assert_eq!(restored.font_family, font_family);
+            assert_eq!(restored.font_scale, 1.25);
+        }
+    }
+
+    #[test]
+    fn unknown_font_family_falls_back_to_smiley() {
+        for font_family in ["", "unknown", "Codex", "url(remote-font)"] {
+            let preferences = WidgetPreferences {
+                font_family: font_family.into(),
+                ..Default::default()
+            };
+            assert_eq!(preferences.normalized().font_family, "smiley");
+        }
+    }
+
+    #[test]
     fn skipped_update_version_is_optional_for_existing_preferences() {
         let preferences: WidgetPreferences = serde_json::from_str(
             r#"{"locked":false,"pinnedProvider":null,"autoRotateSeconds":12,"resetRiskAdjustmentPercent":7}"#,
