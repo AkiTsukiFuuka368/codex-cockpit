@@ -36,7 +36,7 @@ export function CloudSyncSettings({ usage, zh, onSynced }: { usage: TokeiUsage |
     const refresh = async () => {
       try {
         const [next, status] = await Promise.all([call<CloudStatus>("get_cloud_sync_status"), getUsageSyncStatus()]);
-        if (active) { setCloud(next); setRuntime(status); setDevice(current => current || status.settings?.deviceId || `device-${crypto.randomUUID().slice(0, 8)}`); }
+        if (active) { setCloud(next); setRuntime(status); setDevice(current => current || status.settings?.deviceId || status.localDeviceId || `device-${crypto.randomUUID().slice(0, 8)}`); }
       } catch { if (active) setError(zh ? "暂时无法读取云同步状态" : "Cloud status unavailable"); }
     };
     void refresh(); const timer = window.setInterval(() => void refresh(), 5000);

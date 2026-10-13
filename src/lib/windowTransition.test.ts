@@ -24,34 +24,14 @@ describe("waitForSurfacePaint", () => {
 });
 
 describe("surface crossfade", () => {
-  it("keeps an inert unscaled outgoing surface and removes it on completion", () => {
+  it("keeps the live surface crisp without cloning or opacity animation", () => {
     document.body.innerHTML = '<div id="root"><main class="quota-card"><button id="action">Open</button></main></div>';
-    const animations: Array<{ cancel: ReturnType<typeof vi.fn>; onfinish: (() => void) | null }> = [];
-    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: vi.fn(() => {
-      const animation = { cancel: vi.fn(), onfinish: null };
-      animations.push(animation);
-      return animation;
-    }) });
-    const source = document.querySelector<HTMLElement>("main")!;
-    vi.spyOn(source, "getBoundingClientRect").mockReturnValue({ left: 4, top: 4, width: 520, height: 600 } as DOMRect);
+    const animate = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
     const reveal = prepareSurfaceCrossfade();
-    const outgoing = document.body.lastElementChild as HTMLElement;
-    expect(outgoing.inert).toBe(true);
-    expect(outgoing.getAttribute("aria-hidden")).toBe("true");
-    expect(outgoing.querySelector("[id]")).toBeNull();
-    expect(outgoing.style.width).toBe("520px");
-    expect(outgoing.style.pointerEvents).toBe("none");
     reveal.start();
-    expect(animations).toHaveLength(2);
-    animations[0].onfinish?.();
-    expect(outgoing.isConnected).toBe(false);
-    animations[1].onfinish?.();
-    expect(animations[1].cancel).toHaveBeenCalledOnce();
-    const superseded = prepareSurfaceCrossfade();
-    const cancelledCopy = document.body.lastElementChild;
-    superseded.cancel();
-    superseded.start();
-    expect(cancelledCopy?.isConnected).toBe(false);
-    expect(animations).toHaveLength(2);
+    reveal.cancel();
+    expect(document.querySelectorAll("body > .quota-card, body > .quota-island")).toHaveLength(0);
+    expect(animate).not.toHaveBeenCalled();
   });
 });

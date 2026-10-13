@@ -16,12 +16,17 @@ export function activeResetWatch(forecast: ResetForecast | null | undefined, now
     || current - checked >= RESET_WATCH_MAX_AGE_MS
     || observed > current + CLOCK_TOLERANCE_MS
     || expires <= current || expires <= observed
+    || (watch.signalKind !== undefined && watch.signalKind !== "watch" && watch.signalKind !== "scheduled")
     || (watch.level !== "elevated" && watch.level !== "strong")
     || (watch.resetChancePercent !== null && (!Number.isInteger(watch.resetChancePercent) || watch.resetChancePercent < 0 || watch.resetChancePercent > 100))) return null;
   return watch;
 }
 
 export function resetWatchLabel(watch: ResetWatch, language: Language): string {
+  if (watch.signalKind === "scheduled") {
+    return language === "en" ? "Reset announced · scheduled time · tracked by codex-resets.com" : "重置已宣布 · 预计时间 · codex-resets.com 跟踪";
+  }
   const chance = watch.resetChancePercent === null ? "" : ` · ${watch.resetChancePercent}%`;
-  return language === "en" ? `Reset Watch${chance} · third-party forecast` : `重置预警${chance} · 第三方预测`;
+  const strength = watch.level === "strong" ? (language === "en" ? "strong signal" : "较强信号") : (language === "en" ? "elevated signal" : "关注信号");
+  return language === "en" ? `Reset Watch · ${strength}${chance} · third-party forecast` : `重置预警 · ${strength}${chance} · 第三方预测`;
 }

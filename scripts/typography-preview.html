@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>驾驶舱字体检查 · 模拟数据</title>
+    <style>
+      html, body { margin: 0; min-height: 100%; overflow: auto !important; background: #181b22 !important; }
+      #root { width: auto !important; height: auto !important; overflow: visible !important; padding: 24px; }
+      .font-check-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 18px; color: #f0f4f8; font: 14px/1.5 system-ui; }
+      .font-check-controls label { display: flex; align-items: center; gap: 7px; }
+      .font-check-controls select { font: inherit; color: #152031; }
+      .font-check-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; }
+      .font-check-example { flex: 0 0 520px; width: 520px; }
+      .font-check-example > h2 { margin: 0 0 10px; color: #f0f4f8; font: 14px/1.5 system-ui; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./typography-preview.tsx"></script>
+  </body>
+</html>

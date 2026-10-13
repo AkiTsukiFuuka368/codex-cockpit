@@ -1,9 +1,67 @@
 import { describe, expect, it } from "vitest";
-import { aggregateGroupUsage, canonicalModelId, createUsagePreview, formatTokens, periodStart, validateGroupSettings } from "./tokeiUsage";
+import { aggregateGlobalUsage, aggregateGroupUsage, canonicalModelId, createUsagePreview, formatTokens, periodStart, validateGroupSettings, withLiveLocalUsage, type ProjectUsageSnapshot } from "./tokeiUsage";
 
 const now = new Date(2026, 8, 10, 12);
 
 describe("personal Codex usage", () => {
+  it("inserts the native local ledger only once and preserves it during a partial rescan", () => {
+    const preview = createUsagePreview(now);
+    const data = { ...preview, devices: [], groups: [], defaultGroupId: null, localGroupId: null, status: "unavailable" as const, warnings: ["config_unavailable", "sync_unavailable"] };
+    const projects: ProjectUsageSnapshot = {
+      deviceId: "local-synthetic-device", updatedAt: preview.fetchedAt, status: "ready", coverage: "local",
+      scannedFiles: 1, pricingSource: "bundled-catalog", pricingUpdatedAt: null, warnings: [],
+      projects: [{ id: "one", name: "One", daily: preview.devices[0].daily }],
+    };
+    const merged = withLiveLocalUsage(data, projects);
+    expect(aggregateGlobalUsage(merged, "all", now).totalTokens).toBe(2_000_000);
+    expect(merged.devices).toHaveLength(1);
+    expect(withLiveLocalUsage(merged, projects)).toBe(merged);
+    expect(withLiveLocalUsage(merged, { ...projects, updatedAt: "2026-09-10T12:00:00Z", status: "partial", warnings: ["scan_limit"] })).toBe(merged);
+    expect(data.devices).toEqual([]);
+    expect(merged.groups).toEqual([]);
+    expect(withLiveLocalUsage(data, { ...projects, status: "unavailable" })).toBe(data);
+    expect(withLiveLocalUsage(data, { ...projects, deviceId: null })).toBe(data);
+    const retained = { ...data, devices: preview.devices };
+    const withPeer = withLiveLocalUsage(retained, projects);
+    expect(withPeer.devices[0]).toBe(retained.devices[0]);
+    expect(withPeer.devices[1].id).toBe(projects.deviceId);
+  });
+  it("creates a live local ledger on fresh installs without an older sync device", () => {
+    const data = createUsagePreview(now);
+    const daily = data.devices[0].daily;
+    data.devices = [];
+    data.status = "unavailable";
+    const projects: ProjectUsageSnapshot = { deviceId: "Demo Mac", updatedAt: now.toISOString(), status: "ready", coverage: "local", scannedFiles: 1, pricingSource: "test", pricingUpdatedAt: null, warnings: [], projects: [{ id: "local", name: "Local", daily }] };
+    const next = withLiveLocalUsage(data, projects);
+    expect(next.devices).toHaveLength(1);
+    expect(aggregateGroupUsage(next, "demo", "today", now).hasData).toBe(true);
+    expect(aggregateGroupUsage(next, "demo", "today", now).totalTokens).toBeGreaterThan(0);
+    expect(withLiveLocalUsage(data, { ...projects, status: "unavailable", projects: [] })).toBe(data);
+    expect(data.devices).toHaveLength(0);
+  });
+  it("uses a newer live local scan for both model and task-era cost, without changing peers", () => {
+    const data = createUsagePreview(now);
+    const local = data.devices[0];
+    local.updatedAt = "2026-09-10T02:26:00Z";
+    data.devices.push({ ...structuredClone(local), id: "Peer PC" });
+    const oldDay = local.daily["2026-09-10"];
+    const freshDay = structuredClone(oldDay);
+    freshDay.estimatedCostUsd = 138.83;
+    freshDay.models[0].estimatedCostUsd = 100;
+    freshDay.models[1].estimatedCostUsd = 38.83;
+    local.ranges.all = { ...structuredClone(oldDay), start: null, end: null };
+    const projects: ProjectUsageSnapshot = {
+      deviceId: local.id, updatedAt: "2026-09-10T04:53:00Z", status: "ready", coverage: "local",
+      scannedFiles: 1, pricingSource: "app-catalog", pricingUpdatedAt: null, warnings: [],
+      projects: [{ id: "one", name: "One", daily: { "2026-09-10": freshDay } }],
+    };
+    const merged = withLiveLocalUsage(data, projects);
+    expect(aggregateGroupUsage(merged, "demo", "today", now).estimatedCostUsd).toBeCloseTo(138.83);
+    expect(aggregateGroupUsage(merged, "demo", "all", now).estimatedCostUsd).toBeCloseTo(138.83);
+    expect(merged.devices[1]).toBe(data.devices[1]);
+    expect(data.devices[0].daily["2026-09-10"].estimatedCostUsd).toBe(oldDay.estimatedCostUsd);
+    expect(withLiveLocalUsage(data, { ...projects, updatedAt: "2026-09-10T01:00:00Z" })).toBe(data);
+  });
   it("uses Chinese count units only in Chinese", () => {
     expect([999, 1200, 10000, 206710000, 1e9].map(value => formatTokens(value, true))).toEqual(["999", "1.2千", "1万", "2.07亿", "10亿"]);
     expect(formatTokens(206710000, false)).toBe("206.71M");

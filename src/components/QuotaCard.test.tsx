@@ -49,8 +49,9 @@ describe("Plus dual quota display", () => {
     expect(container.querySelector(".capsule-daily-value")).toHaveTextContent("0%");
     expect(container.querySelector(".capsule-quota-readout--over")).toBeInTheDocument();
     rerender(<QuotaOrb snapshot={{ ...plus, shortWindow: null }} compactLayout="capsule" onDrag={() => {}} />);
-    expect(container.querySelector(".capsule-daily-value")).toHaveTextContent("—");
-    expect(container.querySelector(".capsule-daily-value")).not.toHaveTextContent("74");
+    expect(container.querySelector(".capsule-daily-value")).toHaveTextContent("74%");
+    expect(container.querySelector(".capsule-ring--five-hour")).not.toBeInTheDocument();
+    expect(screen.getByRole("button")).not.toHaveAccessibleName(/5 小时剩余/);
     rerender(<QuotaOrb snapshot={codex} compactLayout="capsule" onDrag={() => {}} />);
     expect(container.querySelector(".capsule-ring--five-hour")).not.toBeInTheDocument();
   });
@@ -59,9 +60,26 @@ describe("Plus dual quota display", () => {
       onSelectProvider={() => {}} onLock={() => {}} onLanguage={() => {}} onDrag={() => {}} onHover={() => {}} consumingProviders={new Set()} />);
     expect(screen.getByRole("group", { name: "5h remaining 42%" })).toHaveTextContent("Weekly remaining 74%");
     expect(container.querySelector(".codex-ring-progress--five-hour")).toHaveAttribute("stroke-dasharray", "42 58");
+    const readout = container.querySelector(".codex-ring-card--weekly .codex-ring-value") as HTMLElement;
+    expect(readout).toHaveTextContent("42%");
+    expect(readout.style.getPropertyValue("--ring-readout-fit")).toBe("1");
+    expect(container.querySelector(".codex-ring-visual--dual")).toBeInTheDocument();
     rerender(<QuotaCard snapshot={{ ...plus, shortWindow: null }} snapshots={[plus]} preferences={{ ...DEFAULT_WIDGET_PREFERENCES, codexFocusMode: true, language: "en" }}
       onSelectProvider={() => {}} onLock={() => {}} onLanguage={() => {}} onDrag={() => {}} onHover={() => {}} consumingProviders={new Set()} />);
-    expect(screen.getByRole("group", { name: "5h remaining" })).toHaveTextContent("5h data unavailable");
+    expect(screen.queryByRole("group", { name: "5h remaining" })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Weekly remaining 74%" })).toBeInTheDocument();
+    expect(container.querySelector(".codex-ring-progress--five-hour")).not.toBeInTheDocument();
+    expect(container.querySelector(".codex-ring-visual--dual")).not.toBeInTheDocument();
+  });
+  it("uses remaining-quota warning thresholds when a missing 5h falls back to the week", () => {
+    const weeklyOnly = { ...plus, shortWindow: null };
+    const { container, rerender } = render(<QuotaOrb snapshot={{ ...weeklyOnly, weeklyWindow: { ...plus.weeklyWindow!, remainingPercent: 90 } }} compactLayout="capsule" onDrag={() => {}} />);
+    expect(container.querySelector(".capsule-quota-readout--normal")).toBeInTheDocument();
+    rerender(<QuotaOrb snapshot={{ ...weeklyOnly, weeklyWindow: { ...plus.weeklyWindow!, remainingPercent: 20 } }} compactLayout="capsule" onDrag={() => {}} />);
+    expect(container.querySelector(".capsule-quota-readout--warning")).toBeInTheDocument();
+    rerender(<QuotaOrb snapshot={{ ...weeklyOnly, weeklyWindow: { ...plus.weeklyWindow!, remainingPercent: 0 } }} compactLayout="capsule" onDrag={() => {}} />);
+    expect(container.querySelector(".capsule-quota-readout--over")).toBeInTheDocument();
+    expect(container.querySelector(".capsule-ring--five-hour")).not.toBeInTheDocument();
   });
 });
 
@@ -372,6 +390,25 @@ describe("QuotaCard platform ledger", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复网站风险" }));
     expect(onRiskChange).toHaveBeenLastCalledWith(null);
     expect(screen.queryByText(/来源 18%/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { language: "zh-CN" as const, label: "重置风险", website: "网站", manual: "手动", hint: "默认规划参考值", unofficial: "不是官方重置概率" },
+    { language: "en" as const, label: "Reset risk", website: "Website", manual: "Manual", hint: "default planning reference", unofficial: "not an official reset probability" },
+  ])("keeps fallback risk wording plain and explains the reference in $language", ({ language, label, website, manual, hint, unofficial }) => {
+    const props = { snapshot: codex, snapshots: [codex], preferences: { ...preferences, codexFocusMode: true, language },
+      resetWatch: { signalKind: "scheduled" as const, level: "strong" as const, resetChancePercent: null, observedAt: "2026-07-20T00:00:00Z", expiresAt: "2026-07-23T07:00:00Z" },
+      onSelectProvider: noop, onLock: noop, onLanguage: noop, onDrag: noop, onHover: noop, consumingProviders: new Set<string>() };
+    const { rerender } = render(<QuotaCard {...props} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/备用|Fallback/)).not.toBeInTheDocument();
+    const riskControl = screen.getByRole("slider", { name: label }).closest(".today-quota-advice-risk");
+    expect(riskControl).toHaveAttribute("title", expect.stringContaining(hint));
+    expect(riskControl).toHaveAttribute("title", expect.stringContaining(unofficial));
+    rerender(<QuotaCard {...props} resetRiskSource="website" />);
+    expect(screen.getByText(`${label} · ${website}`)).toBeInTheDocument();
+    rerender(<QuotaCard {...props} preferences={{ ...props.preferences, resetRiskManualEnabled: true, resetRiskOverridePercent: 35 }} />);
+    expect(screen.getByText(`${label} · ${manual}`)).toBeInTheDocument();
   });
 
   it("turns the daily ring red and shows the over-cap ratio", () => {

@@ -11,3 +11,23 @@ test('generic asynchronous level setter is excluded from macOS presence updates'
   assert.equal((presence.match(/\.set_always_on_top/g) ?? []).length, 1);
   assert.doesNotMatch(presence, /set_focus|makeKey|activate/);
 });
+
+test('macOS hides the Dock only with a working tray and retains a failure fallback', () => {
+  const traySetup = source.match(
+    /if setup_tray\(app\)\.is_err\(\)\s*\{(?<fallback>[\s\S]*?)\}\s*else\s*\{(?<success>[\s\S]*?)\}\s*if preferences\.locked/,
+  );
+  assert.ok(traySetup, 'setup_tray result branch should remain explicit');
+  const { fallback, success } = traySetup.groups;
+  assert.match(
+    fallback,
+    /#\[cfg\(target_os = "macos"\)\]\s*app\.set_activation_policy\(tauri::ActivationPolicy::Regular\)/,
+  );
+  assert.match(fallback, /get_webview_window\("widget"\)[\s\S]*?set_skip_taskbar\(false\)/);
+  assert.match(
+    success,
+    /#\[cfg\(target_os = "macos"\)\]\s*app\.set_activation_policy\(tauri::ActivationPolicy::Accessory\)/,
+  );
+  assert.doesNotMatch(fallback, /ActivationPolicy::Accessory/);
+  const plist = readFileSync(new URL('../src-tauri/Info.plist', import.meta.url), 'utf8');
+  assert.match(plist, /<key>LSUIElement<\/key>\s*<true\/>/);
+});

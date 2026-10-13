@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GearSix } from "@phosphor-icons/react";
 import { isTauri } from "../lib/bridge";
 import { getProjectUsage, getTokeiUsage } from "../lib/tokeiBridge";
-import { aggregateGroupUsage, aggregateGlobalUsage, aggregateProjectUsage, aggregateTaskUsage, aggregateSyncedTaskUsage, formatTokens, metricValue, reconcileTaskUsage, type AggregatedTaskUsage, type UsageMetrics, type UsageMetric, type ProjectUsageSnapshot, type ModelUsage, type TokeiUsage, type UsagePeriod } from "../lib/tokeiUsage";
+import { aggregateGroupUsage, aggregateGlobalUsage, aggregateProjectUsage, aggregateTaskUsage, aggregateSyncedTaskUsage, formatTokens, metricValue, reconcileTaskUsage, withLiveLocalUsage, type AggregatedTaskUsage, type UsageMetrics, type UsageMetric, type ProjectUsageSnapshot, type ModelUsage, type TokeiUsage, type UsagePeriod } from "../lib/tokeiUsage";
 import { UsageChart, usageColor, usageRankColor } from "./UsageChart";
 import { modelUsageColors, UNRANKED_MODEL_COLOR } from "../lib/modelUsageColors";
 import { TaskUsageRow } from "./TaskUsageRow";
 import { UsageCalendar } from "./UsageCalendar";
 import { CustomTaskStatistics } from "./CustomTaskStatistics";
 import { DailyUsageTrend } from "./DailyUsageTrend";
+import { LocalUsageSourceSettings } from "./LocalUsageSourceSettings";
 import { newestDevices, rangeLabel, tasksInRange, usageInRange, type UsageDateRange } from "../lib/usageCalendar";
 
 const PERIODS: readonly UsagePeriod[] = ["today", "7d", "30d", "all"];
@@ -35,11 +36,11 @@ function ModelRow({ model, max, zh, color, metric, total }: { model: ModelUsage;
   </details>;
 }
 
-export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendarOpen, onCalendarOpenChange, calendarPortalTarget }: { zh: boolean; onOpenSettings?: () => void; calendarOpen?: boolean; onCalendarOpenChange?: (open: boolean) => void; calendarPortalTarget?: HTMLElement | null }) {
-  const [data, setData] = useState<TokeiUsage | null>(null);
+export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () => undefined, calendarOpen, onCalendarOpenChange, calendarPortalTarget }: { zh: boolean; initialUsage?: TokeiUsage | null; onOpenSettings?: () => void; calendarOpen?: boolean; onCalendarOpenChange?: (open: boolean) => void; calendarPortalTarget?: HTMLElement | null }) {
+  const [data, setData] = useState<TokeiUsage | null>(initialUsage);
   const [error, setError] = useState(false);
-  const [groupId, setGroupId] = useState<string | null>(null);
-  const [global, setGlobal] = useState(false);
+  const [groupId, setGroupId] = useState<string | null>(initialUsage?.localGroupId ?? null);
+  const [global, setGlobal] = useState(!initialUsage?.localGroupId);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
   const [period, setPeriod] = useState<UsagePeriod>("today");
   const [dateRange, setDateRange] = useState<UsageDateRange | null>(null);
@@ -73,21 +74,24 @@ export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendar
     }
     void refresh();
     const timer = window.setInterval(() => { if (document.visibilityState !== "hidden") void refresh(); }, 30000);
-    return () => { active = false; mounted.current = false; window.clearInterval(timer); };
+    const sourceChanged = () => { void refresh(); };
+    window.addEventListener("codex-source-changed", sourceChanged);
+    return () => { active = false; mounted.current = false; window.clearInterval(timer); window.removeEventListener("codex-source-changed", sourceChanged); };
   }, []);
 
-  const scopedData = useMemo(() => data && dateRange ? usageInRange(data, dateRange) : data, [data, dateRange]);
+  const liveData = useMemo(() => data && withLiveLocalUsage(data, projects), [data, projects]);
+  const scopedData = useMemo(() => liveData && dateRange ? usageInRange(liveData, dateRange) : liveData, [liveData, dateRange]);
   const scopedProjects = useMemo(() => projects && dateRange ? tasksInRange(projects, dateRange) : projects, [projects, dateRange]);
   const selectedPeriod = dateRange ? "all" : period;
   const all = useMemo(() => scopedData ? aggregateGlobalUsage(scopedData, selectedPeriod) : null, [scopedData, selectedPeriod]);
   const summary = useMemo(() => global ? all : scopedData ? aggregateGroupUsage(scopedData, groupId, selectedPeriod) : null, [scopedData, groupId, selectedPeriod, global, all]);
   const fullDevices = useMemo(() => {
-    if (!data) return [];
-    const ids = new Set(global ? [...data.devices.map(device => device.id), ...data.groups.flatMap(group => group.deviceIds)] : data.groups.find(group => group.id === groupId)?.deviceIds ?? []);
-    const available = new Map(newestDevices(data.devices).map(device => [device.id, device]));
+    if (!liveData) return [];
+    const ids = new Set(global ? [...liveData.devices.map(device => device.id), ...liveData.groups.flatMap(group => group.deviceIds)] : liveData.groups.find(group => group.id === groupId)?.deviceIds ?? []);
+    const available = new Map(newestDevices(liveData.devices).map(device => [device.id, device]));
     // A configured peer with no snapshot is unknown, not silently absent from historical coverage.
     return [...ids].map(id => available.get(id) ?? { id, updatedAt: null, stale: true, collectionPartial: true, daily: {}, ranges: {} });
-  }, [data, global, groupId]);
+  }, [liveData, global, groupId]);
   useEffect(() => {
     let active = true;
     let busy = false;
@@ -101,15 +105,20 @@ export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendar
         if (active) { setProjects(next); setProjectError(false); }
         if (next.warnings.includes("scan_limit")) delay = 1500;
       }
-      catch { if (active) setProjectError(true); }
+      catch (error) {
+        if (String(error) === "collector_busy") delay = 1500;
+        else if (active) setProjectError(true);
+      }
       finally { busy = false; if (active) timer = window.setTimeout(() => { void refresh(); }, delay); }
     }
     void refresh();
-    return () => { active = false; window.clearTimeout(timer); };
+    const sourceChanged = () => { window.clearTimeout(timer); void refresh(); };
+    window.addEventListener("codex-source-changed", sourceChanged);
+    return () => { active = false; window.clearTimeout(timer); window.removeEventListener("codex-source-changed", sourceChanged); };
   }, [view, period]);
   const localScope = useMemo(() => global
     ? { groups: [{ id: "global", name: "global", deviceIds: summary?.devices.map(device => device.id) ?? [] }], defaultGroupId: "global" }
-    : data, [data, global, summary]);
+    : liveData, [liveData, global, summary]);
   const localScopeId = global ? "global" : groupId;
   const projectRows = useMemo(() => scopedProjects && localScope ? aggregateProjectUsage(scopedProjects, localScope, localScopeId, selectedPeriod) : [], [scopedProjects, localScope, localScopeId, selectedPeriod]);
   const taskUsage = useMemo(() => scopedProjects && localScope ? aggregateSyncedTaskUsage(scopedProjects, localScope, localScopeId, selectedPeriod) : null, [scopedProjects, localScope, localScopeId, selectedPeriod]);
@@ -141,9 +150,18 @@ export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendar
   const stale = summary?.devices.some((device) => device.stale) ?? false;
   const partial = Boolean(summary?.missingDeviceIds.length || summary?.unavailablePeriodDeviceIds.length || summary?.incompleteModels || summary?.devices.some(device => device.collectionPartial) || data?.status === "partial");
   const latest = summary?.devices.map((device) => device.updatedAt).filter((date): date is string => Boolean(date)).sort().at(-1);
+  const noObservedUsage = Boolean(liveData && !liveData.devices.some(device => Object.keys(device.daily).length || Object.keys(device.ranges).length));
+  const localReadUnavailable = projectError || projects?.status === "unavailable";
+  const localReadFailureText = projects?.warnings.includes("codex_directory_missing")
+    ? (zh ? "找不到 Codex 数据目录，当前显示上次缓存。" : "Codex data folder not found; showing the last cached usage.")
+    : projects?.warnings.includes("source_permission_denied")
+      ? (zh ? "无法读取 Codex 数据目录，当前显示上次缓存。请检查读取权限。" : "Cannot read the Codex data folder; showing the last cached usage. Check read permissions.")
+      : projects?.warnings.includes("no_usage_records")
+        ? (zh ? "当前目录没有可统计的记录，已保留上次缓存。" : "No usage records in the current folder; the previous cache is retained.")
+        : (zh ? "本机记录刷新失败，当前显示上次缓存。" : "Local records could not be refreshed; showing the last cached usage.");
   const scopeValue = (value: UsageMetrics | null) => metric === "cost" ? costLabel(value?.estimatedCostUsd ?? null, zh) : formatTokens(value?.totalTokens ?? 0, zh);
 
-  if (!data) return <section className="codex-usage-panel"><p className={error ? "usage-error" : "usage-note"} role="status">{error ? (zh ? "暂时无法读取用量，请稍后重试。" : "Usage is unavailable. Try again shortly.") : (zh ? "正在读取用量…" : "Loading usage…")}</p></section>;
+  if (!data) return <section className="codex-usage-panel"><p className={error ? "usage-error" : "usage-note"} role="status">{error ? (zh ? "暂时无法读取用量，请稍后重试。" : "Usage is unavailable. Try again shortly.") : (zh ? "正在读取用量…" : "Loading usage…")}</p>{error && <LocalUsageSourceSettings zh={zh} compact />}</section>;
 
   return <section className="codex-usage-panel" aria-label={zh ? "Codex 用量" : "Codex usage"}>
     <div className="usage-toolbar">
@@ -164,26 +182,35 @@ export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendar
       <button type="button" className="usage-settings-button" aria-label={zh ? "打开组员设置" : "Open member settings"} title={zh ? "打开组员设置" : "Open member settings"} onClick={onOpenSettings}><GearSix /></button>
     </div>
 
-    <CustomTaskStatistics key={[global ? "global" : groupId, period, dateRange?.start, dateRange?.end, view, metric].join("|")} rows={taskUsage?.rows ?? []} zh={zh} loading={!projects && !projectError} error={projectError} partial={projects?.status === "partial" || projects?.peerTasks?.some(peer => peer.partial)} periodLabel={dateRange ? rangeLabel(dateRange) : periodLabel(period, zh)} />
+    {!noObservedUsage && localReadUnavailable && <div className="usage-note">
+      <p role="status">{localReadFailureText}</p>
+      <button type="button" className="usage-text-button" onClick={onOpenSettings}>{zh ? "检查 Codex 数据目录" : "Check Codex data folder"}</button>
+    </div>}
+
+    {noObservedUsage && (projects || projectError)
+      ? <LocalUsageSourceSettings zh={zh} compact noRecords={projects?.warnings.includes("no_usage_records")} />
+      : <CustomTaskStatistics key={[global ? "global" : groupId, period, dateRange?.start, dateRange?.end, view, metric].join("|")} rows={taskUsage?.rows ?? []} zh={zh} loading={!projects && !projectError} error={projectError} partial={projects?.status === "partial" || projects?.peerTasks?.some(peer => peer.partial)} periodLabel={dateRange ? rangeLabel(dateRange) : periodLabel(period, zh)} />}
 
     {!group && !global ? <p className="usage-empty">{zh ? "选择一名组员，或到设置中分配设备。" : "Choose a member, or assign devices in settings."}</p> : <>
-        <div className="usage-total">{!donut && <><span>{metric === "tokens" ? (zh ? "Token 用量" : "Token usage") : (zh ? "估算成本" : "Estimated cost")}</span><strong aria-label={totalCostUnavailable ? costLabel(null, zh) : undefined}>{summary?.hasData ? totalCostUnavailable ? "—" : metric === "cost" ? costLabel(chartTotal, zh) : formatTokens(summary.totalTokens, zh) : "—"}</strong></>}<small>{metric === "tokens" ? `${zh ? "估算成本" : "Estimated cost"} ${costLabel(summary?.estimatedCostUsd ?? null, zh)}` : `${totalCostUnavailable ? `${costLabel(null, zh)} · ` : ""}${formatTokens(summary?.totalTokens ?? 0, zh)} Tokens`}</small><button type="button" className="usage-text-button" onClick={toggleMetric}>{metric === "tokens" ? (zh ? "看成本" : "Costs") : (zh ? "看 Token" : "Tokens")}</button>{view === "tasks" && <small className="usage-inline-status">{[projects?.warnings.includes("scan_limit") ? (zh ? "补扫中" : "Scanning") : null, metric === "cost" && taskCostIncomplete ? (zh ? "成本不全" : "Partial cost") : null, taskReconciliation?.mismatch ? (zh ? "待对账" : "Ledger mismatch") : null].filter(Boolean).join(" · ")}</small>}</div>
+        <div className="usage-total">{!donut && <><span>{metric === "tokens" ? (zh ? "Token 用量" : "Token usage") : (zh ? "估算成本" : "Estimated cost")}</span><strong aria-label={totalCostUnavailable ? costLabel(null, zh) : undefined}>{summary?.hasData ? totalCostUnavailable ? "—" : metric === "cost" ? costLabel(chartTotal, zh) : formatTokens(summary.totalTokens, zh) : "—"}</strong></>}<small>{metric === "tokens" ? `${zh ? "估算成本" : "Estimated cost"} ${costLabel(summary?.estimatedCostUsd ?? null, zh)}` : `${totalCostUnavailable ? `${costLabel(null, zh)} · ` : ""}${(summary?.hasData ? formatTokens(summary.totalTokens, zh) : "—")} Tokens`}</small><button type="button" className="usage-text-button" onClick={toggleMetric}>{metric === "tokens" ? (zh ? "看成本" : "Costs") : (zh ? "看 Token" : "Tokens")}</button>{view === "tasks" && <small className="usage-inline-status">{[projects?.warnings.includes("scan_limit") ? (zh ? "补扫中" : "Scanning") : null, metric === "cost" && taskCostIncomplete ? (zh ? "成本不全" : "Partial cost") : null, taskReconciliation?.mismatch ? (zh ? "待对账" : "Ledger mismatch") : null].filter(Boolean).join(" · ")}</small>}</div>
         <div className={donut ? "usage-model-today" : undefined}>
-        {view === "tasks" && <UsageChart rows={rows} total={taskTotal} knownTotal={knownTotal} period={period} devices={[]} ids={[]} zh={zh} metric={metric} onToggle={toggleMetric} tasks colors={taskColors} />}
-        {(view === "models" || view === "users") && summary && <UsageChart rows={rows} total={chartTotal} knownTotal={metric === "cost" ? summary.knownCostUsd : undefined} period={period} devices={summary.devices} ids={colorIds} zh={zh} metric={metric} onToggle={toggleMetric} users={view === "users"} summaryOnly={summaryOnly} colors={modelColors} />}
+        {view === "tasks" && (summary?.hasData || rows.length > 0) && <UsageChart rows={rows} total={taskTotal} knownTotal={knownTotal} period={period} devices={[]} ids={[]} zh={zh} metric={metric} onToggle={toggleMetric} tasks colors={taskColors} />}
+        {(view === "models" || view === "users") && summary?.hasData && <UsageChart rows={rows} total={chartTotal} knownTotal={metric === "cost" ? summary.knownCostUsd : undefined} period={period} devices={summary.devices} ids={colorIds} zh={zh} metric={metric} onToggle={toggleMetric} users={view === "users"} summaryOnly={summaryOnly} colors={modelColors} />}
         <div className="usage-ranking">
           {view === "tasks" ? (visibleRows as AggregatedTaskUsage[]).map((task) => <TaskUsageRow key={task.id} task={task} max={metricValue(rows[0], metric) ?? 0} color={taskColors[task.id]} zh={zh} metric={metric} total={knownTotal} />) : visibleRows.map((model) => <ModelRow key={model.id} model={model as ModelUsage} max={metricValue(rows[0], metric) ?? 0} color={modelColors ? modelColors[model.id] ?? UNRANKED_MODEL_COLOR : usageColor(model.id, colorIds)} zh={zh} metric={metric} total={view === "projects" ? knownTotal : denominator} />)}
           {!rows.length && <p className="usage-empty">{view === "tasks" ? projectError ? (zh ? "任务统计暂不可用。" : "Task statistics unavailable.") : !projects ? (zh ? "正在读取任务统计…" : "Loading task statistics…") : (zh ? "这段时间暂无可归属的任务记录。" : "No attributed task records in this period.") : view === "projects" ? projectError ? (zh ? "项目统计暂不可用。" : "Project statistics unavailable.") : !projects ? (zh ? "正在读取本机项目统计…" : "Loading local project statistics…") : !projects.deviceId || !(global ? summary?.devices.some(device => device.id === projects.deviceId) : group?.deviceIds.includes(projects.deviceId)) ? (zh ? "此分组未包含本机，暂无项目明细。" : "This group does not include this device.") : (zh ? "这段时间暂无可归属的项目记录。" : "No attributed project records in this period.") : (zh ? "这段时间暂无模型用量记录。" : "No model usage recorded in this period.")}</p>}
-          {projectError && rows.length > 0 && (view === "tasks" || view === "projects") && <p className="usage-note">{zh ? "本机明细刷新失败，暂显示上次统计。" : "Local details refresh failed; showing previous results."}</p>}
           {rows.length > 5 && <button type="button" className="usage-text-button" onClick={() => setShowAll((value) => !value)}>{showAll ? (zh ? "收起" : "Show less") : (zh ? `其余 ${rows.length - 5} 项` : `${rows.length - 5} more`)}</button>}
         </div>
         </div>
     </>}
-    <DailyUsageTrend devices={fullDevices} metric={metric} zh={zh} anchorDate={dateRange?.end} resetKey={global ? "global" : groupId} />
+    {!noObservedUsage && <DailyUsageTrend devices={fullDevices} metric={metric} zh={zh} anchorDate={dateRange?.end} resetKey={global ? "global" : groupId} />}
     {(error || stale || partial) && <p className="usage-note" role="status">{error ? (zh ? "刷新失败 · 上次快照" : "Refresh failed · Last snapshot") : stale ? (zh ? "含离线快照" : "Includes offline snapshots") : (zh ? "部分数据缺失" : "Partial data")}</p>}
-    <footer className="usage-footer"><span>{!isTauri() ? (zh ? "示例数据" : "Sample data") : latest ? `${zh ? "最近同步" : "Last synced"} ${new Date(latest).toLocaleTimeString(zh ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" })}` : !summary ? (zh ? "尚未选择分组" : "No group selected") : (zh ? "尚无同步记录" : "Not synced yet")}</span>
+    <footer className="usage-footer"><span>{!isTauri() ? (zh ? "示例数据" : "Sample data") : latest ? `${zh ? "数据更新" : "Data updated"} ${new Date(latest).toLocaleTimeString(zh ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" })}` : !summary ? (zh ? "尚未选择分组" : "No group selected") : (zh ? "尚无用量记录" : "No usage records yet")}</span>
         <details className="usage-explanation"><summary>{zh ? "统计说明" : "Usage details"}</summary><div>
         {unknownCost && <p className="usage-note">{zh ? "成本不完整 · 占比仅计已知金额" : "Incomplete costs · Shares use known amounts only"}</p>}
+        {projects?.pricingSource === "bundled-catalog" && <p>{zh ? "使用 App 自带的参考价格，不需要云同步或旧配置。按标准 API 文本价格估算，不是订阅扣费。" : "Using the app's built-in reference prices, without cloud sync or legacy setup. Standard API-equivalent text estimates, not subscription charges."}{projects.pricingUpdatedAt ? ` ${zh ? "价格核对日期" : "Prices checked"}: ${projects.pricingUpdatedAt}` : ""}</p>}
+        {projects?.warnings.includes("missing_model_price") && <p className="usage-note">{zh ? "部分模型没有可确认的价格：Token 已记录，未知金额不按 $0 计算。" : "Some models have no verified price: tokens are recorded, and unknown costs are not counted as $0."}</p>}
+        {projects?.warnings.includes("cost_context_unavailable") && <p className="usage-note">{zh ? "部分历史记录缺少可核对的单次用量，无法确定计价档位；已保留 Token，金额暂不估算。" : "Some historical records lack verifiable per-request usage, so the pricing tier is unknown. Tokens are retained; those costs remain unavailable."}</p>}
         {Boolean(summary?.unavailablePeriodDeviceIds.length) && <p className="usage-note">{zh ? `部分设备没有${periodLabel(period, true)}数据。` : `Some devices lack ${periodLabel(period, false).toLowerCase()} data.`}</p>}
         {view === "tasks" && metric === "cost" && taskCostIncomplete && !unknownCost && <p className="usage-note">{zh ? "任务成本不完整 · 占比仅计已知金额" : "Incomplete task costs · Shares use known amounts only"}</p>}
         {view === "projects" && <p className="usage-note">{zh ? "分组全部设备总量 ↑ · 本机项目 ↓" : "All grouped devices total ↑ · Local projects ↓"}{projects?.status === "partial" ? (zh ? " · Token 补扫中" : " · Token scan partial") : ""}</p>}
@@ -199,7 +226,7 @@ export function CodexUsagePanel({ zh, onOpenSettings = () => undefined, calendar
             ? `本机未归属 ${scopeValue(taskReconciliation.outstandingLocal)} · 其他设备 ${scopeValue(taskReconciliation.nonLocal)}`
             : `Unattributed local ${scopeValue(taskReconciliation.outstandingLocal)} · Other devices ${scopeValue(taskReconciliation.nonLocal)}`}</p>)}
           <p>{global ? (zh ? "全局按现有用户分组汇总，每台设备只计一次；未分组设备单列。" : "Global combines configured user groups, counting each device once; unassigned devices are separate.") : (zh ? "仅计所选分组的 Codex 用量。" : "Only Codex usage from this group.")}{zh ? "Token 包含输入、缓存输入和输出，推理不重复累加。" : "Tokens include uncached input, cache and output; reasoning is not added twice."}</p>
-          <p>{zh ? "成本来自本地价格表或兼容的历史快照估算，不是订阅实际扣费，也不是官方剩余额度。" : "Costs use a local price catalog or compatible historical estimates, not subscription charges or remaining quota."}</p>
+          <p>{zh ? "金额优先使用自己的或共享空间的价格表，没有配置时使用 App 自带的参考价格；也会保留兼容的历史估算。它不是订阅实际扣费，也不是官方剩余额度。" : "Costs prefer your own or shared-space catalog, falling back to built-in reference prices and compatible historical estimates. They are not subscription charges or remaining quota."}</p>
           <p>{zh ? "日账与时段汇总不重复累加。仅在时间边界匹配时使用汇总；本周不等于近7天。离线设备保留截至快照时的统计。" : "Daily ledgers and range totals are never added twice. Ranges require matching date bounds; this week is not rolling seven days. Offline totals stop at their snapshot time."}</p>
           {view === "models" && <p>{zh ? "颜色按GPT数字代际从新到旧等间隔取红到蓝；同代按名称固定排序。隐藏或代际不明的模型为灰色；展开更多时重新均分色带。仅有名称的旧快照按原名称汇总，不猜测具体变体。" : "Visible GPT generations are spaced evenly from new/red to old/blue, with name-based ties. Hidden or unversioned models are gray; expanding resamples the palette. Name-only legacy rows stay name-grouped without guessing variants."}</p>}
           {view === "tasks" && <p>{zh ? "任务标题、每日用量及子 Agent 归属通过 Cloudflare 同步；不上传消息正文或项目路径。任务按设备与任务 ID 区分，只在同一设备内合并已证实的子 Agent。其他设备需升级并上传后才有任务明细；离线时保留上次快照。" : "Task titles, daily usage and subagent relationships sync via Cloudflare, without messages or project paths. Identity combines device and task IDs; subagents fold only within one device. Peers need to upgrade and upload task details; offline snapshots remain available."}</p>}

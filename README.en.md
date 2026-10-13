@@ -23,7 +23,7 @@ a server or disable system security protections.
 
 The repository includes an [installation and troubleshooting skill](skills/codex-cockpit/SKILL.md), a [Cloudflare skill](skills/cloudflare-sync/SKILL.md), and a [code and troubleshooting map](skills/codex-cockpit/references/repository-map.md). The guides are written in Chinese; Codex can use them while responding in your language.
 
-For repeated use, ask `$skill-installer` to install `skills/codex-cockpit` from `HouSiyuan2001/codex-cockpit`. See [setup and support prompts](docs/CODEX-HELP.md). Repository access is still required while it is private. Installing a skill does not install the app or deploy a server.
+For repeated use, ask `$skill-installer` to install `skills/codex-cockpit` from `HouSiyuan2001/codex-cockpit`. See [setup and support prompts](docs/CODEX-HELP.md). The repository is public. Installing a skill does not install the app or deploy a server.
 
 ## What can I do with it?
 
@@ -46,7 +46,7 @@ Open [Releases](https://github.com/HouSiyuan2001/codex-cockpit/releases) and cho
 
 You can start with local usage tracking. You do not need a server before opening the app. Set up sync later if you want to share data.
 
-This is a beta, and the repository is still private. You need repository access to download it. New builds can check for signed updates in Settings and ask before restarting to install. While the repository is private, the app cannot access downloads anonymously; install manually. Older builds also need one manual upgrade first. See [update details](docs/AUTO-UPDATE.md).
+This is a beta. Published installers are listed in Releases; local test fixes are not uploaded before acceptance. Update-enabled builds can check for signed updates in Settings and ask before restarting to install. Older builds need one manual upgrade first. See [update details](docs/AUTO-UPDATE.md).
 
 **Before installing:** the Mac build is not Apple-notarized, and the Windows installer has no publisher signature. Your system may warn that it cannot identify the developer. Check the download source and the release checksums; do not turn off system protection to install the app.
 

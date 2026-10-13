@@ -1,6 +1,6 @@
 [package]
 name = "quota-float"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 description = "A lightweight floating coding-assistant quota monitor"
 authors = ["Quota Float contributors"]
 license = "MIT"
@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
@@ -42,8 +42,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWindow", "NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "objc2-core-foundation", "NSData"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

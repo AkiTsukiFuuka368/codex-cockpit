@@ -2,6 +2,7 @@ import { isTauri } from "./bridge";
 import { createUsagePreview, validateGroupSettings, type DailyModelUsage, type ProjectUsageSnapshot, type TokeiGroupSettings, type TokeiUsage, type UsageMetrics } from "./tokeiUsage";
 
 let previewSettings: TokeiGroupSettings | null = null;
+let pendingProjectUsage: Promise<ProjectUsageSnapshot> | null = null;
 
 export async function getProjectUsage(): Promise<ProjectUsageSnapshot> {
   if (!isTauri()) {
@@ -15,8 +16,15 @@ export async function getProjectUsage(): Promise<ProjectUsageSnapshot> {
       { id: "demo-fork", name: "比较另一个设计方案", projectName: "示例项目", parentId: "demo-root", rootId: "demo-fork", relation: "fork", daily: scaledDaily(.5) },
     ] };
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<ProjectUsageSnapshot>("get_codex_project_usage");
+  // Views may refresh at the same time. Share only the in-flight collection,
+  // not its result: a completed read or a failure must allow the next refresh.
+  if (!pendingProjectUsage) {
+    pendingProjectUsage = (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return invoke<ProjectUsageSnapshot>("get_codex_project_usage");
+    })().finally(() => { pendingProjectUsage = null; });
+  }
+  return pendingProjectUsage;
 }
 
 export async function getTokeiUsage(): Promise<TokeiUsage> {

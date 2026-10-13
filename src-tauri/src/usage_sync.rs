@@ -49,6 +49,7 @@ pub struct SyncRuntime {
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
     pub settings: Option<SyncSettings>,
+    pub local_device_id: String,
     pub imported: bool,
     #[serde(flatten)]
     pub runtime: SyncRuntime,
@@ -247,6 +248,7 @@ fn status(data: &Path, home: &Path) -> Result<SyncStatus, String> {
     let saved = settings_at(data)?;
     let imported = saved.is_none();
     Ok(SyncStatus {
+        local_device_id: crate::local_usage::device_id(data, home)?,
         settings: saved.or_else(|| discover(home)),
         imported,
         runtime: runtime(data),
@@ -269,13 +271,31 @@ pub async fn get_codex_project_usage(
         .path()
         .app_config_dir()
         .map_err(|_| "sync_storage_unavailable")?;
-    let mut result = codex_project_usage::get_codex_project_usage_with_catalog(Some(
-        crate::cloud_sync::pricing_path(&data),
-    ))
+    let _guard = RUN_LOCK.try_lock().map_err(|_| "collector_busy")?;
+    collect_local_usage(&data).await
+}
+async fn collect_local_usage(
+    data: &Path,
+) -> Result<codex_project_usage::ProjectUsageSnapshot, String> {
+    let home = dirs::home_dir().ok_or("home_unavailable")?;
+    let id = crate::local_usage::device_id(data, &home)?;
+    tokei_usage::bootstrap_local_groups(data, &home, &id)?;
+    let source = crate::local_usage::source_path(data, &home)?;
+    let mut result = codex_project_usage::get_codex_project_usage_from_source(
+        Some(crate::cloud_sync::pricing_path(data)),
+        Some(source),
+    )
     .await?;
-    if let Some(settings) = settings_at(&data)? {
-        identify(&mut result, &settings.device_id);
-        result.peer_tasks = crate::task_sync::read_peers(&data, &settings.device_id);
+    identify(&mut result, &id);
+    if settings_at(data).ok().flatten().is_some() {
+        result.peer_tasks = crate::task_sync::read_peers(data, &id);
+    }
+    // Save observed aggregates for the next launch. An absent/unreadable source
+    // must never manufacture an empty snapshot or replace a last-good ledger.
+    if !result.projects.is_empty() && result.status != "unavailable" {
+        let baselines = read_baselines(data, &home, &id);
+        let payload = usage_sync_snapshot::build(&id, &result, &baselines)?;
+        write_json(&data.join("local-usage-cache.json"), &payload)?;
     }
     Ok(result)
 }
@@ -303,7 +323,13 @@ fn identify(result: &mut codex_project_usage::ProjectUsageSnapshot, id: &str) {
     result
         .warnings
         .retain(|w| w != "device_identity_unavailable");
-    if result.status == "partial" && result.warnings.is_empty() {
+    if result.status == "partial"
+        && !result.projects.is_empty()
+        && !result
+            .warnings
+            .iter()
+            .any(|warning| codex_project_usage::affects_token_coverage(warning))
+    {
         result.status = "ready".into();
     }
 }
@@ -340,18 +366,19 @@ pub fn save_usage_sync_settings(
     }
     get_usage_sync_status(app)
 }
-fn read_baselines(data: &Path, home: &Path, settings: &SyncSettings) -> Vec<Value> {
+fn read_baselines(data: &Path, home: &Path, device_id: &str) -> Vec<Value> {
     let mut paths = vec![
+        data.join("local-usage-cache.json"),
         data.join("cloud-snapshots")
-            .join(format!("{}.json", settings.device_id)),
+            .join(format!("{device_id}.json")),
         data.join("usage-sync-local.json"),
         data.join("usage-sync-repository/cockpit")
-            .join(format!("{}.json", settings.device_id)),
+            .join(format!("{device_id}.json")),
         data.join("usage-sync-repository")
-            .join(format!("{}.json", settings.device_id)),
+            .join(format!("{device_id}.json")),
     ];
     if let Some((dir, id)) = legacy_directory(home) {
-        if id == settings.device_id {
+        if id == device_id {
             paths.push(dir.join(format!("{id}.json")));
         }
     }
@@ -380,9 +407,10 @@ pub async fn sync_usage_now(app: tauri::AppHandle) -> Result<SyncStatus, String>
         }
         let mut collected = tokio::time::timeout(
             Duration::from_secs(20),
-            codex_project_usage::get_codex_project_usage_with_catalog(Some(
-                crate::cloud_sync::pricing_path(&data),
-            )),
+            codex_project_usage::get_codex_project_usage_from_source(
+                Some(crate::cloud_sync::pricing_path(&data)),
+                Some(crate::local_usage::source_path(&data, &home)?),
+            ),
         )
         .await
         .map_err(|_| "collector_timeout")??;
@@ -392,7 +420,7 @@ pub async fn sync_usage_now(app: tauri::AppHandle) -> Result<SyncStatus, String>
         state.last_collected_at = Some(collected_at.clone());
         state.collector_status = Some(collector_status.clone());
         if crate::cloud_sync::config(&data)?.is_some() {
-            let baselines = read_baselines(&data, &home, &settings);
+            let baselines = read_baselines(&data, &home, &settings.device_id);
             let mut payload =
                 usage_sync_snapshot::build(&settings.device_id, &collected, &baselines)?;
             payload["_cockpit"]["protocolVersion"] = serde_json::json!(2);
@@ -423,7 +451,7 @@ pub async fn sync_usage_now(app: tauri::AppHandle) -> Result<SyncStatus, String>
                 &settings.branch,
                 &settings.device_id,
             );
-            let baselines = read_baselines(&data, &home, &settings);
+            let baselines = read_baselines(&data, &home, &settings.device_id);
             let mut payload =
                 usage_sync_snapshot::build(&settings.device_id, &collected, &baselines)?;
             comfort_sync::attach_local_feedback(
@@ -470,11 +498,19 @@ pub async fn sync_usage_now(app: tauri::AppHandle) -> Result<SyncStatus, String>
 pub fn start(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_peer_attempt: Option<std::time::Instant> = None;
+        let mut last_local_attempt: Option<std::time::Instant> = None;
         loop {
-            tokio::time::sleep(Duration::from_secs(15)).await;
             let Ok(data) = app.path().app_config_dir() else {
+                tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             };
+            if last_local_attempt.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                if let Ok(_guard) = RUN_LOCK.try_lock() {
+                    let _ = collect_local_usage(&data).await;
+                    last_local_attempt = Some(std::time::Instant::now());
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
             if !matches!(crate::cloud_sync::config(&data), Ok(Some(_))) {
                 continue;
             }
@@ -507,7 +543,10 @@ pub fn start(app: tauri::AppHandle) {
     });
 }
 pub fn merge_managed_usage(data: &Path, usage: &mut TokeiUsage) {
-    let mut paths = vec![data.join("usage-sync-local.json")];
+    let mut paths = vec![
+        data.join("local-usage-cache.json"),
+        data.join("usage-sync-local.json"),
+    ];
     for dir in [
         data.join("cloud-snapshots"),
         data.join("usage-sync-repository"),
@@ -540,12 +579,12 @@ pub fn merge_managed_usage(data: &Path, usage: &mut TokeiUsage) {
         let Some(id) = value["_device"].as_str().filter(|s| safe_id(s)) else {
             continue;
         };
-        let local = path == data.join("usage-sync-local.json");
+        let local = path == data.join("usage-sync-local.json")
+            || path == data.join("local-usage-cache.json");
         if local {
-            if settings_at(data)
-                .ok()
-                .flatten()
-                .is_none_or(|s| s.device_id != id)
+            if dirs::home_dir()
+                .and_then(|home| crate::local_usage::device_id(data, &home).ok())
+                .is_none_or(|local_id| local_id != id)
             {
                 continue;
             }
@@ -569,7 +608,7 @@ pub fn merge_managed_usage(data: &Path, usage: &mut TokeiUsage) {
             usage.devices.push(device);
         }
     }
-    if settings_at(data).ok().flatten().is_some() {
+    if settings_at(data).ok().flatten().is_some() || !usage.devices.is_empty() {
         usage
             .warnings
             .retain(|w| w != "config_unavailable" && w != "sync_unavailable");
@@ -588,6 +627,79 @@ pub fn merge_managed_usage(data: &Path, usage: &mut TokeiUsage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn unidentified_snapshot() -> codex_project_usage::ProjectUsageSnapshot {
+        codex_project_usage::ProjectUsageSnapshot {
+            device_id: None,
+            updated_at: Utc::now().to_rfc3339(),
+            status: "partial".into(),
+            coverage: "local".into(),
+            scanned_files: 1,
+            pricing_source: "bundled-catalog".into(),
+            pricing_updated_at: None,
+            task_metadata_coverage: "partial".into(),
+            projects: vec![codex_project_usage::ProjectUsage {
+                id: "synthetic-project".into(),
+                name: "Synthetic project".into(),
+                daily: Default::default(),
+            }],
+            tasks: vec![],
+            peer_tasks: vec![],
+            warnings: vec!["device_identity_unavailable".into()],
+        }
+    }
+    #[test]
+    fn standalone_native_identity_persists_without_cloud_or_tokei() {
+        let f = Fixture::new();
+        let data = f.0.join("app");
+        let id = crate::local_usage::device_id(&data, &f.0).unwrap();
+        let groups = tokei_usage::bootstrap_local_groups(&data, &f.0, &id).unwrap();
+        let mut result = unidentified_snapshot();
+        identify(&mut result, &id);
+        assert_eq!(result.device_id.as_deref(), Some(id.as_str()));
+        assert_eq!(result.status, "ready");
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            local_group_id_for_test(&groups.groups, &id),
+            Some(groups.groups[0].id.as_str())
+        );
+        assert_eq!(crate::local_usage::device_id(&data, &f.0).unwrap(), id);
+        assert!(!f.0.join(".tokei").exists());
+        assert!(settings_at(&data).unwrap().is_none());
+        assert!(!data.join("cloud-sync.json").exists());
+        assert!(!data.join("usage-sync-repository").exists());
+    }
+    fn local_group_id_for_test<'a>(
+        groups: &'a [crate::tokei_usage::UsageGroup],
+        id: &str,
+    ) -> Option<&'a str> {
+        groups
+            .iter()
+            .find(|group| group.device_ids.iter().any(|device| device == id))
+            .map(|group| group.id.as_str())
+    }
+    #[test]
+    fn identifying_local_usage_keeps_metadata_and_pricing_warnings_out_of_token_coverage() {
+        let mut result = unidentified_snapshot();
+        result.warnings.extend([
+            "task_metadata_title_missing".into(),
+            "missing_model_price".into(),
+            "cost_context_unavailable".into(),
+        ]);
+        identify(&mut result, "local-synthetic-device");
+        assert_eq!(result.status, "ready");
+        assert_eq!(result.warnings.len(), 3);
+        for warning in ["scan_limit", "source_permission_denied", "source_reindexed"] {
+            let mut partial = unidentified_snapshot();
+            partial.warnings.push(warning.into());
+            identify(&mut partial, "local-synthetic-device");
+            assert_eq!(partial.status, "partial", "{warning}");
+            assert!(partial.warnings.iter().any(|value| value == warning));
+        }
+        let mut empty = unidentified_snapshot();
+        empty.projects.clear();
+        identify(&mut empty, "local-synthetic-device");
+        assert_eq!(empty.status, "partial");
+    }
     #[test]
     fn imports_only_credential_free_https_identities_as_ssh() {
         assert_eq!(
@@ -619,6 +731,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn local_cache_is_readable_without_sync_and_cannot_spoof_another_device() {
+        let f = Fixture::new();
+        write_json(
+            &f.0.join("local-usage.json"),
+            &serde_json::json!({"deviceId":"Local-PC","codexDirectory":null}),
+        )
+        .unwrap();
+        let mut usage = TokeiUsage {
+            local_group_id: None,
+            fetched_at: Utc::now().to_rfc3339(),
+            status: "unavailable".into(),
+            groups: vec![],
+            default_group_id: None,
+            devices: vec![],
+            warnings: vec!["config_unavailable".into(), "sync_unavailable".into()],
+            project_breakdown_available: false,
+        };
+        let payload = |id| serde_json::json!({"_device":id,"_ts":Utc::now().timestamp(),"_ledger":{"tools":{"codex":{"2026-01-01":{"in":100,"cached":0,"out":1,"cost":1}}}}});
+        write_json(&f.0.join("local-usage-cache.json"), &payload("Other-PC")).unwrap();
+        merge_managed_usage(&f.0, &mut usage);
+        assert!(usage.devices.is_empty());
+        write_json(&f.0.join("local-usage-cache.json"), &payload("Local-PC")).unwrap();
+        merge_managed_usage(&f.0, &mut usage);
+        assert_eq!(usage.devices.len(), 1);
+        assert_eq!(
+            usage.devices[0].daily["2026-01-01"].metrics.total_tokens,
+            101
+        );
+        assert!(!usage.warnings.iter().any(|w| w == "sync_unavailable"));
+        assert!(!f.0.join("cloud-sync.json").exists());
+        assert!(!f.0.join("usage-sync.json").exists());
     }
     #[test]
     fn refuses_credentials_options_and_unsafe_identity() {

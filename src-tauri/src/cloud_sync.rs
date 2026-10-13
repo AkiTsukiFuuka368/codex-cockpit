@@ -302,6 +302,9 @@ fn verify_device(data: &Path, device: &str) -> Result<(), String> {
     if !usage_sync::safe_id(device) {
         return Err("cloud_device_required".into());
     }
+    if crate::local_usage::saved_device_id(data)?.is_some_and(|id| id != device) {
+        return Err("cloud_identity_mismatch".into());
+    }
     let legacy = data.join("usage-sync.json");
     if legacy.exists() {
         let saved = tokei_usage::read_json(&legacy, 32768)?;

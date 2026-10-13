@@ -20,6 +20,15 @@ describe("active website Watch", () => {
     expect(activeResetWatch({ ...forecast, activeWatch: { ...watch, level: "elevated", resetChancePercent: 10 } }, now)).not.toBeNull();
     expect(activeResetWatch({ ...forecast, activeWatch: { ...watch, resetChancePercent: null } }, now)).not.toBeNull();
   });
+  it("accepts a current scheduled announcement without treating it as a probability", () => {
+    const scheduled: ResetWatch = {
+      signalKind: "scheduled", level: "strong", resetChancePercent: null,
+      observedAt: "2026-09-09T05:00:00Z", expiresAt: "2026-09-09T09:00:00Z",
+    };
+    expect(activeResetWatch({ ...forecast, activeWatch: scheduled }, now)).toEqual(scheduled);
+    expect(resetWatchLabel(scheduled, "zh-CN")).toContain("重置已宣布");
+    expect(resetWatchLabel(scheduled, "en")).not.toContain("forecast");
+  });
   it("clears on null, old payloads, retraction, expiration or stale checks", () => {
     for (const candidate of [null, { ...forecast, activeWatch: undefined }, { ...forecast, watchCheckedAt: undefined }, { ...forecast, activeWatch: null }]) {
       expect(activeResetWatch(candidate, now)).toBeNull();
@@ -31,6 +40,7 @@ describe("active website Watch", () => {
   it.each([
     { expiresAt: "bad" }, { observedAt: "bad" }, { observedAt: "2026-09-11T00:00:00Z" },
     { expiresAt: "2026-09-09T04:00:00Z" }, { level: "unknown" },
+    { signalKind: "unknown" },
     { resetChancePercent: 101 }, { resetChancePercent: -1 }, { resetChancePercent: 1.5 },
   ])("fails closed for malformed Watch %j", (patch) => {
     expect(activeResetWatch({ ...forecast, activeWatch: { ...watch, ...patch } as ResetWatch }, now)).toBeNull();
@@ -39,6 +49,7 @@ describe("active website Watch", () => {
     expect(activeResetWatch({ ...forecast, watchCheckedAt: "bad" }, now)).toBeNull();
     expect(activeResetWatch({ ...forecast, watchCheckedAt: "2026-09-11T00:00:00Z" }, now)).toBeNull();
     expect(resetWatchLabel(watch, "zh-CN")).toContain("第三方预测");
+    expect(resetWatchLabel({ ...watch, resetChancePercent: null }, "zh-CN")).toContain("较强信号");
     expect(resetWatchLabel({ ...watch, resetChancePercent: null }, "en")).not.toContain("%");
   });
 });

@@ -1,13 +1,59 @@
 @font-face { font-family: "Smiley Sans"; src: url("./assets/fonts/SmileySans-Oblique.ttf.woff2") format("woff2"); font-style: normal; font-weight: 100 900; font-display: swap; }
 @font-face { font-family: "Quota Sans"; src: local("SF Pro Display"), local("Segoe UI Variable Display"); font-display: swap; }
+@font-face { font-family: "LXGW WenKai GB Screen"; src: url("./assets/fonts/LXGWWenKaiGBScreen.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: "Cockpit FZ Song"; src: local("FZQingKeBenYueSongS-R-GB"), local("FZQingKeBenYueSongS-R-GB-Regular"), local("方正清刻本悦宋简体"); font-style: normal; font-weight: 400; font-display: swap; }
 
 :root {
-  font-family: "Smiley Sans", "得意黑", "Quota Sans", "Segoe UI", system-ui, sans-serif;
+  --ui-system-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  /* This public system stack only approximates Codex's native UI feel; it does
+     not claim or bundle Codex's internal fonts. */
+  --ui-codex-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ui-yahei-font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", var(--ui-system-font);
+  --ui-font-family: "Smiley Sans", "得意黑", var(--ui-system-font);
+  font-family: var(--ui-font-family);
   color: rgba(255, 255, 255, 0.96);
   background: transparent;
   font-synthesis: none;
   --edge-safe-inset: 4px;
+  --ui-font-scale: 1.5;
+  --cockpit-copy-scale: 1;
+  --cockpit-copy-leading: 1.4;
+  --cockpit-number-tracking: -.04em;
+  --cockpit-number-size: 39px;
   --usage-heatmap-gradient: linear-gradient(90deg, #305b84, #96cfd3 50%, #ffe0a4 68%, #fa9f48 84%, #e65851);
+}
+
+/* Platform defaults apply only until a persisted, allowlisted choice is loaded.
+   Proprietary fonts stay on the user's computer and are never redistributed. */
+html[data-platform="windows"] { --ui-font-family: var(--ui-system-font); }
+html[data-font-family="system"] { --ui-font-family: var(--ui-system-font); }
+html[data-font-family="codex"] { --ui-font-family: var(--ui-codex-font); }
+html[data-font-family="yahei"] { --ui-font-family: var(--ui-yahei-font); }
+html[data-font-family="smiley"] { --ui-font-family: "Smiley Sans", "得意黑", var(--ui-system-font); }
+html[data-font-family="wenkai"] { --ui-font-family: "LXGW WenKai GB Screen", var(--ui-system-font); }
+html[data-font-family="times"] { --ui-font-family: "Times New Roman", "TimesNewRomanPSMT", "Songti SC", "SimSun", var(--ui-system-font); }
+html[data-font-family="fz-song"] { --ui-font-family: "Cockpit FZ Song", "FZQingKeBenYueSongS-R-GB", var(--ui-system-font); }
+
+/* A font choice is more than a family name: reading faces need less compressed
+   tracking and a slightly larger text body than the condensed display face. */
+html[data-font-family="system"],
+html[data-font-family="codex"] { --cockpit-number-tracking: -.025em; --cockpit-number-size: 32px; }
+html[data-font-family="yahei"] { --cockpit-copy-scale: 1.02; --cockpit-copy-leading: 1.45; --cockpit-number-tracking: -.01em; --cockpit-number-size: 34px; }
+html[data-font-family="wenkai"] { --cockpit-copy-scale: 1.04; --cockpit-copy-leading: 1.5; --cockpit-number-tracking: 0; --cockpit-number-size: 32px; }
+html[data-font-family="times"] { --cockpit-copy-scale: 1.08; --cockpit-copy-leading: 1.5; --cockpit-number-tracking: -.02em; --cockpit-number-size: 35px; }
+html[data-font-family="fz-song"] { --cockpit-copy-scale: 1.1; --cockpit-copy-leading: 1.55; --cockpit-number-tracking: 0; --cockpit-number-size: 36px; }
+html[data-font-family="wenkai"] .codex-focus-card,
+html[data-font-family="fz-song"] .codex-focus-card { font-synthesis: weight; }
+
+/* Users can trade the glass effect for an unfiltered transparent surface.
+   Keep this centralized so every current and future overlay follows the same
+   persisted accessibility setting. */
+html[data-background-blur="false"],
+html[data-background-blur="false"] *,
+html[data-background-blur="false"] *::before,
+html[data-background-blur="false"] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 * { box-sizing: border-box; }
@@ -1735,7 +1781,7 @@ button.usage-stat-card:hover { border-color: color-mix(in srgb, var(--accent-col
 html,
 body,
 #root {
-  font-family: "Smiley Sans", "得意黑", "Quota Sans", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--ui-font-family);
 }
 
 button,
@@ -2397,7 +2443,8 @@ textarea {
 .codex-focus-brand .provider-mark { width: 30px; height: 30px; padding: 4px; }
 .codex-focus-brand-copy strong {
   overflow: hidden;
-  font-size: calc(14px * var(--ui-font-scale, 1));
+  font-size: calc(14px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale));
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2411,9 +2458,9 @@ textarea {
   align-items: center;
   gap: 5px;
   color: var(--glass-muted);
-  font-size: calc(7px * var(--ui-font-scale, 1));
+  font-size: max(11px, calc(8px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
   font-weight: 760;
-  letter-spacing: .14em;
+  letter-spacing: .06em;
 }
 .codex-focus-live i {
   width: 6px;
@@ -2454,7 +2501,8 @@ textarea {
   align-items: center;
   gap: 6px;
   color: var(--glass-muted);
-  font-size: calc(10.5px * var(--ui-font-scale, 1));
+  font-size: calc(10.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale));
+  line-height: 1.35;
   font-weight: 720;
 }
 .codex-ring-header > span i {
@@ -2470,9 +2518,10 @@ textarea {
 }
 .codex-ring-header small {
   color: var(--glass-faint);
-  font-size: calc(7px * var(--ui-font-scale, 1));
+  font-size: max(10px, calc(7.5px * var(--ui-font-scale, 1)));
   font-weight: 780;
-  letter-spacing: .16em;
+  letter-spacing: .08em;
+  flex: none;
 }
 .codex-ring-visual {
   position: relative;
@@ -2526,45 +2575,48 @@ textarea {
 .person-cost-legend small { font-size: .9em; }
 .codex-ring-value {
   position: absolute;
-  inset: 0;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max-content;
   display: flex;
   align-items: baseline;
   justify-content: center;
-  align-self: center;
-  padding-top: 4px;
+  white-space: nowrap;
+  pointer-events: none;
   color: var(--glass-ink);
 }
 .codex-ring-value strong {
-  font-size: calc(39px * var(--ui-font-scale, 1));
+  /* Measured glyphs fit the circle without character-count guesses or transforms. */
+  font-size: calc(var(--cockpit-number-size) * var(--ui-font-scale, 1) * var(--ring-readout-fit, 1));
   font-weight: 650;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -.06em;
+  letter-spacing: var(--cockpit-number-tracking);
   line-height: 1;
 }
 .codex-ring-value span {
-  margin-left: 3px;
+  margin-left: calc(3px * var(--ring-readout-fit, 1));
   color: var(--glass-muted);
-  font-size: calc(13px * var(--ui-font-scale, 1));
+  font-size: calc(var(--cockpit-number-size) / 3 * var(--ui-font-scale, 1) * var(--ring-readout-fit, 1));
   font-weight: 700;
 }
 .codex-ring-caption {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--glass-faint);
-  font-size: calc(8px * var(--ui-font-scale, 1));
-  line-height: 1.4;
-  white-space: nowrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  color: var(--glass-muted);
+  font-size: max(12px, calc(9px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
+  line-height: var(--cockpit-copy-leading);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .codex-ring-caption span,
 .codex-ring-caption strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
 }
 .codex-ring-caption strong {
   color: var(--glass-muted);
-  font-size: calc(9px * var(--ui-font-scale, 1));
+  font-size: inherit;
   font-weight: 680;
 }
 .codex-ring-footer {
@@ -2572,9 +2624,9 @@ textarea {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid rgba(231, 255, 250, .1);
-  color: var(--glass-faint);
-  font-size: calc(9px * var(--ui-font-scale, 1));
-  line-height: 1.4;
+  color: var(--glass-muted);
+  font-size: max(12px, calc(9px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
+  line-height: var(--cockpit-copy-leading);
 }
 .codex-ring-footer > span {
   display: flex;
@@ -2588,14 +2640,17 @@ textarea {
 }
 .codex-ring-footer .weekly-reset-footer > span {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 .codex-ring-footer strong {
   color: var(--glass-ink);
-  font-size: calc(10.5px * var(--ui-font-scale, 1));
+  font-size: calc(10.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale));
   font-weight: 680;
+  margin-left: auto;
+  white-space: nowrap;
 }
 .codex-ring-card--daily .codex-ring-footer {
   min-height: 48px;
@@ -2606,29 +2661,34 @@ textarea {
 }
 .codex-ring-card--daily .daily-budget-control label {
   color: var(--glass-muted);
-  font-size: calc(9px * var(--ui-font-scale, 1));
+  font-size: inherit;
 }
 .codex-ring-card--daily .daily-budget-control output {
   color: var(--glass-ink);
-  font-size: calc(10.5px * var(--ui-font-scale, 1));
+  font-size: calc(10.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale));
 }
 .codex-ring-card--daily .daily-budget-recommendation {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   margin-top: 4px;
-  color: var(--glass-faint);
-  font-size: calc(7.5px * var(--ui-font-scale, 1));
+  color: var(--glass-muted);
+  font-size: max(12px, calc(8.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
   font-weight: 680;
-  line-height: 1.35;
+  line-height: var(--cockpit-copy-leading);
 }
+.codex-ring-card--daily .daily-budget-recommendation > span { white-space: nowrap; }
 .codex-ring-card--daily .daily-budget-control input[type="range"] {
   height: 14px;
   margin: 2px 0 0;
 }
 .codex-ring-card--daily .daily-budget-control p {
   margin-top: 4px;
-  color: var(--glass-faint);
-  font-size: calc(7.5px * var(--ui-font-scale, 1));
-  line-height: 1.35;
+  color: var(--glass-muted);
+  font-size: max(12px, calc(8.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
+  line-height: var(--cockpit-copy-leading);
+  flex-wrap: wrap;
+  gap: 2px 8px;
 }
 .codex-focus-insights {
   display: grid;
@@ -2643,6 +2703,19 @@ textarea {
 }
 .codex-focus-insights .today-quota-advice {
   padding: 10px;
+}
+.codex-focus-card .today-quota-advice header strong {
+  font-size: calc(10.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale));
+}
+.codex-focus-card .today-quota-advice header small,
+.codex-focus-card .today-quota-advice-grid span,
+.codex-focus-card .today-quota-advice footer {
+  font-size: max(12px, calc(8.5px * var(--ui-font-scale, 1) * var(--cockpit-copy-scale)));
+  line-height: var(--cockpit-copy-leading);
+}
+.codex-focus-card .today-quota-advice-grid span {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .codex-focus-card .today-quota-advice,
 .codex-focus-card .comfort-curve-panel {
@@ -2974,6 +3047,31 @@ textarea {
 .minimal-slider-field {
   display: grid;
   gap: 8px;
+}
+.minimal-font-field {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 17px;
+}
+.minimal-font-field > label {
+  color: var(--glass-muted, #9babbc);
+  font-size: calc(9px * var(--ui-font-scale, 1));
+}
+.minimal-font-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--glass-edge, rgba(225, 249, 244, .15));
+  border-radius: 8px;
+  color: var(--glass-ink, #eef4f6);
+  background: var(--glass-surface-strong, #182336);
+  font-size: calc(10px * var(--ui-font-scale, 1));
+}
+.minimal-font-field > small {
+  color: var(--glass-muted, #9babbc);
+  font-size: calc(8px * var(--ui-font-scale, 1));
+  line-height: 1.5;
 }
 .minimal-slider-field > span {
   display: flex;
@@ -3656,3 +3754,14 @@ textarea {
 .cloud-share-option { display: flex; gap: 8px; align-items: center; }
 .cloud-setup-form > button { justify-self: end; }
 .cloud-endpoint { overflow-wrap: anywhere; }
+
+.local-usage-source { margin-top: 16px; padding: 16px; min-width: 0; border: 1px solid var(--glass-edge); border-radius: 16px; background: var(--glass-surface); }
+.local-usage-source h3 { margin: 0 0 8px; font-size: 1.05em; }
+.local-usage-source p { margin: 8px 0; line-height: 1.5; }
+.local-usage-path { display: grid; gap: 4px; }
+.local-usage-source code { display: block; overflow-wrap: anywhere; white-space: normal; font-size: max(12px, .85em); color: var(--glass-muted); }
+.local-usage-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.local-usage-actions button { padding: 7px 12px; color: inherit; border: 1px solid var(--glass-edge); border-radius: 9px; background: var(--glass-surface); font: inherit; cursor: pointer; }
+.local-usage-actions button:disabled { opacity: .5; cursor: default; }
+.local-usage-actions button:focus-visible { outline: 2px solid var(--glass-accent, #7b9fff); outline-offset: 2px; }
+.local-usage-consent { padding: 10px; border: 1px solid var(--glass-edge); border-radius: 10px; }

@@ -7,6 +7,7 @@ export type WindowCompactLayout = CompactLayout | "capsule";
 export type ExpandedLayout = "dashboard" | "provider-bar" | "stacked";
 export type ColorTheme = "aurora" | "graphite" | "paper";
 export type AppearanceMode = "system" | "light" | "dark";
+export type UiFontFamily = "system" | "codex" | "yahei" | "smiley" | "wenkai" | "times" | "fz-song";
 export type ResolvedAppearance = Exclude<AppearanceMode, "system">;
 export type UpdateChannel = "stable" | "beta";
 
@@ -189,6 +190,7 @@ export interface TokenComfortModel {
 }
 
 export interface ResetWatch {
+  signalKind?: "watch" | "scheduled";
   level: "elevated" | "strong";
   resetChancePercent: number | null;
   observedAt: string;
@@ -242,7 +244,9 @@ export interface WidgetPreferences {
   expandedLayout: ExpandedLayout;
   colorTheme: ColorTheme;
   appearanceMode: AppearanceMode;
+  fontFamily: UiFontFamily;
   fontScale: number;
+  backgroundBlur: boolean;
   personRingColors?: Record<string, string>;
   riskFirst: boolean;
   showHistorySparklines: boolean;

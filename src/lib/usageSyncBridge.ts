@@ -9,6 +9,7 @@ export interface UsageSyncSettings {
 }
 export interface UsageSyncStatus {
   settings: UsageSyncSettings | null;
+  localDeviceId?: string;
   imported: boolean;
   phase: string;
   lastAttemptAt: string | null;

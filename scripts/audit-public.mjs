@@ -1,10 +1,21 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 
 // Defense-in-depth, not a guarantee. Review new assets and history separately.
-const paths = [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {encoding:'utf8'}).split('\0').filter(Boolean))];
+// A local source ZIP has no Git metadata but must pass the same privacy scan.
+function sourceFiles(root = '.') {
+  return readdirSync(root, { withFileTypes: true }).flatMap(entry => {
+    if (['.git', 'node_modules', 'target', 'dist', 'coverage', 'artifacts', '.wrangler', '.DS_Store'].includes(entry.name)) return [];
+    const path = root === '.' ? entry.name : `${root}/${entry.name}`;
+    if (entry.isSymbolicLink()) throw new Error(`Refusing linked source: ${path}`);
+    return entry.isDirectory() ? sourceFiles(path) : [path];
+  });
+}
+const paths = existsSync('.git')
+  ? [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {encoding:'utf8'}).split('\0').filter(Boolean))]
+  : sourceFiles();
 const failures = [];
-const forbiddenFile = /(^|\/)(auth\.json|cloud-sync\.json|usage-sync\.json|cloud-snapshots|\.dev\.vars[^/]*|wrangler\.local\.[^/]+|\.env(?!\.example)[^/]*|id_rsa|id_ed25519)(\/|$)|\.(sqlite3?|db|p12|pfx|pem|key)$/i;
+const forbiddenFile = /(^|\/)(auth\.json|cloud-sync\.json|usage-sync\.json|local-usage\.json|local-usage-cache\.json|cloud-snapshots|\.dev\.vars[^/]*|wrangler\.local\.[^/]+|\.env(?!\.example)[^/]*|id_rsa|id_ed25519)(\/|$)|\.(sqlite3?|db|p12|pfx|pem|key)$/i;
 for (const path of paths) {
   if (forbiddenFile.test(path)) failures.push(`${path}: forbidden runtime/credential file`);
   const data = readFileSync(path);

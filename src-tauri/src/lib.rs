@@ -1,9 +1,11 @@
 mod antigravity;
+mod app_icon;
 mod app_updater;
 mod cloud_sync;
 mod codex;
 mod codex_project_usage;
 mod comfort_sync;
+mod local_usage;
 mod models;
 mod qoder;
 mod reset_forecast;
@@ -67,13 +69,16 @@ const MAX_EXPANDED_LOGICAL_HEIGHT: f64 = 1_200.0;
 const EDGE_SAFE_INSET_LOGICAL: f64 = 4.0;
 const SNAP_THRESHOLD_LOGICAL: f64 = 24.0;
 const POSITION_EPSILON: u32 = 2;
-#[cfg(test)]
-const EXPAND_TRANSITION_STEPS: u32 = 18;
-#[cfg(test)]
-const COLLAPSE_TRANSITION_STEPS: u32 = 14;
 const EXPAND_TRANSITION_MS: u64 = 280;
 const COLLAPSE_TRANSITION_MS: u64 = 220;
-const WIDGET_TRANSITION_FRAME_MS: u64 = 16;
+#[cfg(any(not(target_os = "windows"), test))]
+const SMOOTH_TRANSITION_FRAME_MS: u64 = 16;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TRANSITION_FRAME_MS: u64 = 32;
+#[cfg(target_os = "windows")]
+const WIDGET_TRANSITION_FRAME_MS: u64 = WINDOWS_TRANSITION_FRAME_MS;
+#[cfg(not(target_os = "windows"))]
+const WIDGET_TRANSITION_FRAME_MS: u64 = SMOOTH_TRANSITION_FRAME_MS;
 const BACKGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_FIRST_REFRESH_DELAY: Duration = Duration::from_secs(5);
 
@@ -898,6 +903,12 @@ fn interpolate_u32(start: u32, end: u32, progress: f64) -> u32 {
     (start as f64 + (end as f64 - start as f64) * progress).round() as u32
 }
 
+fn transition_frame_deadline(elapsed_ms: u64, duration_ms: u64, frame_ms: u64) -> u64 {
+    debug_assert!(frame_ms > 0);
+    let next_frame = elapsed_ms / frame_ms + 1;
+    frame_ms.saturating_mul(next_frame).min(duration_ms)
+}
+
 #[cfg(target_os = "macos")]
 fn cocoa_frame_for_widget_rect(
     initial_frame: NSRect,
@@ -1026,6 +1037,7 @@ fn animate_window_to(
         .map(|frame| (frame, window.scale_factor().unwrap_or(1.0)));
 
     let animation_started = Instant::now();
+    let mut last_applied = from;
     loop {
         if generation.load(Ordering::SeqCst) != ticket {
             return Ok(());
@@ -1040,59 +1052,83 @@ fn animate_window_to(
             interpolate_u32(from.size.width, to.size.width, progress),
             interpolate_u32(from.size.height, to.size.height, progress),
         );
+        let rect = WidgetRect { position, size };
+        let position_changed = position != last_applied.position;
+        let size_changed = size != last_applied.size;
         #[cfg(target_os = "macos")]
-        if let Some((initial_frame, scale_factor)) = native_animation {
-            let rect = WidgetRect { position, size };
-            set_macos_window_frame(
-                window,
-                cocoa_frame_for_widget_rect(initial_frame, from, rect, scale_factor),
-            )?;
-        } else if expanding {
-            window
-                .set_size(size)
-                .map_err(|_| "failed to resize widget".to_string())?;
-            window
-                .set_position(position)
-                .map_err(|_| "failed to position widget".to_string())?;
-        } else {
-            window
-                .set_position(position)
-                .map_err(|_| "failed to position widget".to_string())?;
-            window
-                .set_size(size)
-                .map_err(|_| "failed to resize widget".to_string())?;
+        if position_changed || size_changed {
+            if let Some((initial_frame, scale_factor)) = native_animation {
+                set_macos_window_frame(
+                    window,
+                    cocoa_frame_for_widget_rect(initial_frame, from, rect, scale_factor),
+                )?;
+            } else if expanding {
+                if size_changed {
+                    window
+                        .set_size(size)
+                        .map_err(|_| "failed to resize widget".to_string())?;
+                }
+                if position_changed {
+                    window
+                        .set_position(position)
+                        .map_err(|_| "failed to position widget".to_string())?;
+                }
+            } else {
+                if position_changed {
+                    window
+                        .set_position(position)
+                        .map_err(|_| "failed to position widget".to_string())?;
+                }
+                if size_changed {
+                    window
+                        .set_size(size)
+                        .map_err(|_| "failed to resize widget".to_string())?;
+                }
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
-        if expanding {
+        if expanding && (position_changed || size_changed) {
             // Grow under the pointer before shifting the frame so a capsule
             // click cannot briefly fall outside the native window.
-            window
-                .set_size(size)
-                .map_err(|_| "failed to resize widget".to_string())?;
-            window
-                .set_position(position)
-                .map_err(|_| "failed to position widget".to_string())?;
-        } else {
-            window
-                .set_position(position)
-                .map_err(|_| "failed to position widget".to_string())?;
-            window
-                .set_size(size)
-                .map_err(|_| "failed to resize widget".to_string())?;
+            if size_changed {
+                window
+                    .set_size(size)
+                    .map_err(|_| "failed to resize widget".to_string())?;
+            }
+            if position_changed {
+                window
+                    .set_position(position)
+                    .map_err(|_| "failed to position widget".to_string())?;
+            }
+        } else if position_changed || size_changed {
+            if position_changed {
+                window
+                    .set_position(position)
+                    .map_err(|_| "failed to position widget".to_string())?;
+            }
+            if size_changed {
+                window
+                    .set_size(size)
+                    .map_err(|_| "failed to resize widget".to_string())?;
+            }
         }
+        last_applied = rect;
         if linear >= 1.0 {
             break;
         }
         {
             // Pace against an absolute deadline instead of sleeping a fixed
             // amount after each AppKit/WebView update. That keeps scheduling
-            // overhead from accumulating and aligns the resize with a
-            // conventional 60 Hz display cadence.
-            let next_frame =
-                animation_started.elapsed().as_millis() as u64 / WIDGET_TRANSITION_FRAME_MS + 1;
-            let deadline =
-                Duration::from_millis(WIDGET_TRANSITION_FRAME_MS * next_frame).min(duration);
+            // overhead from accumulating. Windows uses a deliberately lower
+            // native geometry cadence because each WebView frame change is
+            // substantially more expensive there; every platform still lands
+            // on the exact duration endpoint.
+            let deadline = Duration::from_millis(transition_frame_deadline(
+                animation_started.elapsed().as_millis() as u64,
+                duration.as_millis() as u64,
+                WIDGET_TRANSITION_FRAME_MS,
+            ));
             if let Some(remaining) = deadline.checked_sub(animation_started.elapsed()) {
                 std::thread::sleep(remaining);
             }
@@ -1821,7 +1857,8 @@ mod geometry_tests {
 
     #[test]
     fn widget_transition_starts_gently_and_stays_symmetric() {
-        let first_expand_frame = smooth_transition_progress(1.0 / EXPAND_TRANSITION_STEPS as f64);
+        let expand_steps = EXPAND_TRANSITION_MS.div_ceil(SMOOTH_TRANSITION_FRAME_MS);
+        let first_expand_frame = smooth_transition_progress(1.0 / expand_steps as f64);
         assert!(first_expand_frame < 0.02);
         assert!((smooth_transition_progress(0.5) - 0.5).abs() < f64::EPSILON);
         assert!(
@@ -1833,7 +1870,25 @@ mod geometry_tests {
     }
 
     #[test]
+    fn windows_transition_has_a_bounded_native_frame_budget_and_exact_deadline() {
+        let expand_frames = EXPAND_TRANSITION_MS.div_ceil(WINDOWS_TRANSITION_FRAME_MS);
+        let collapse_frames = COLLAPSE_TRANSITION_MS.div_ceil(WINDOWS_TRANSITION_FRAME_MS);
+        assert_eq!(expand_frames, 9);
+        assert_eq!(collapse_frames, 7);
+        assert_eq!(
+            transition_frame_deadline(256, EXPAND_TRANSITION_MS, WINDOWS_TRANSITION_FRAME_MS),
+            280
+        );
+        assert_eq!(
+            transition_frame_deadline(219, COLLAPSE_TRANSITION_MS, WINDOWS_TRANSITION_FRAME_MS),
+            220
+        );
+    }
+
+    #[test]
     fn ten_expand_collapse_cycles_preserve_the_capsule_anchor() {
+        let expand_steps = EXPAND_TRANSITION_MS.div_ceil(SMOOTH_TRANSITION_FRAME_MS) as u32;
+        let collapse_steps = COLLAPSE_TRANSITION_MS.div_ceil(SMOOTH_TRANSITION_FRAME_MS) as u32;
         let collapsed = WidgetRect {
             position: PhysicalPosition::new(200, 80),
             size: PhysicalSize::new(96, 48),
@@ -1845,9 +1900,8 @@ mod geometry_tests {
 
         for _ in 0..10 {
             let mut previous = collapsed;
-            for step in 1..=EXPAND_TRANSITION_STEPS {
-                let progress =
-                    smooth_transition_progress(step as f64 / EXPAND_TRANSITION_STEPS as f64);
+            for step in 1..=expand_steps {
+                let progress = smooth_transition_progress(step as f64 / expand_steps as f64);
                 let frame = WidgetRect {
                     position: PhysicalPosition::new(
                         interpolate_i32(collapsed.position.x, expanded.position.x, progress),
@@ -1868,9 +1922,8 @@ mod geometry_tests {
             assert_eq!(previous.position, expanded.position);
             assert_eq!(previous.size, expanded.size);
 
-            for step in 1..=COLLAPSE_TRANSITION_STEPS {
-                let progress =
-                    smooth_transition_progress(step as f64 / COLLAPSE_TRANSITION_STEPS as f64);
+            for step in 1..=collapse_steps {
+                let progress = smooth_transition_progress(step as f64 / collapse_steps as f64);
                 let frame = WidgetRect {
                     position: PhysicalPosition::new(
                         interpolate_i32(expanded.position.x, collapsed.position.x, progress),
@@ -3019,6 +3072,8 @@ pub fn run() {
         .plugin(WindowStateBuilder::default().build())
         .setup(|app| {
             let data_dir = app.path().app_config_dir()?;
+            // Local statistics never require joining a cloud space first.
+            let _ = local_usage::initialize(&data_dir);
             let preferences_path = data_dir.join("preferences.json");
             let runtime_state_path = data_dir.join("runtime-state.json");
             let preferences = load_preferences(&preferences_path);
@@ -3046,9 +3101,16 @@ pub fn run() {
             usage_sync::start(app.handle().clone());
             if setup_tray(app).is_err() {
                 eprintln!("tray setup failed; enabling taskbar fallback");
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
                 if let Some(window) = app.get_webview_window("widget") {
                     let _ = window.set_skip_taskbar(false);
                 }
+            } else {
+                // LSUIElement covers bundle launch; set the runtime policy as well
+                // so Tauri keeps the menu-bar utility out of the macOS Dock.
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             if preferences.locked {
                 let _ = apply_lock(app.handle(), true);
@@ -3077,6 +3139,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_icon::set_app_icon_theme,
+            local_usage::get_local_usage_source,
+            local_usage::save_local_usage_source,
             app_updater::check_cockpit_update,
             tokei_usage::get_tokei_usage,
             usage_sync::get_usage_sync_status,

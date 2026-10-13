@@ -203,12 +203,6 @@ pub(crate) fn validate_groups(settings: &GroupSettings) -> Result<(), String> {
     }
     Ok(())
 }
-fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|p| p.join("usage-groups.json"))
-        .map_err(|_| "settings_unavailable".into())
-}
 fn load_groups(path: &Path, cfg: &Value) -> Result<GroupSettings, String> {
     let mut exists = false;
     for candidate in [path.to_path_buf(), path.with_extension("json.bak")] {
@@ -230,9 +224,37 @@ fn load_groups(path: &Path, cfg: &Value) -> Result<GroupSettings, String> {
 pub(crate) fn local_groups(data: &Path) -> Result<GroupSettings, String> {
     load_groups(&data.join("usage-groups.json"), &config(&home()?))
 }
+pub(crate) fn bootstrap_local_groups(
+    data: &Path,
+    home: &Path,
+    device_id: &str,
+) -> Result<GroupSettings, String> {
+    let _guard = SETTINGS_LOCK.lock().map_err(|_| "settings_unavailable")?;
+    let path = data.join("usage-groups.json");
+    let mut settings = load_groups(&path, &config(home))?;
+    // Never change saved or imported member/device assignments during onboarding.
+    if !settings.groups.is_empty() || fs::symlink_metadata(&path).is_ok() {
+        return Ok(settings);
+    }
+    settings.groups.push(UsageGroup {
+        id: "local-member".into(),
+        name: "我 / Me".into(),
+        device_ids: vec![device_id.to_owned()],
+    });
+    settings.default_group_id = Some("local-member".into());
+    validate_groups(&settings)?;
+    crate::usage_sync::write_json(&path, &settings)?;
+    Ok(settings)
+}
 #[tauri::command]
 pub fn get_tokei_groups(app: tauri::AppHandle) -> Result<GroupSettings, String> {
-    load_groups(&settings_path(&app)?, &config(&home()?))
+    let home = home()?;
+    let data = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "settings_unavailable")?;
+    let id = crate::local_usage::device_id(&data, &home)?;
+    bootstrap_local_groups(&data, &home, &id)
 }
 #[tauri::command]
 pub async fn save_tokei_groups(
@@ -550,20 +572,16 @@ fn load_usage(home: &Path, settings: GroupSettings) -> TokeiUsage {
 #[tauri::command]
 pub async fn get_tokei_usage(app: tauri::AppHandle) -> Result<TokeiUsage, String> {
     let home = home()?;
-    let settings = load_groups(&settings_path(&app)?, &config(&home))?;
     let data_dir = app
         .path()
         .app_config_dir()
         .map_err(|_| "settings_unavailable")?;
+    let device_id = crate::local_usage::device_id(&data_dir, &home)?;
+    let settings = bootstrap_local_groups(&data_dir, &home, &device_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut usage = load_usage(&home, settings);
         crate::usage_sync::merge_managed_usage(&data_dir, &mut usage);
-        let device_id = crate::usage_sync::settings_at(&data_dir)
-            .ok()
-            .flatten()
-            .map(|settings| settings.device_id)
-            .or_else(|| config(&home)["device_id"].as_str().map(str::to_owned));
-        usage.local_group_id = local_group_id(&usage.groups, device_id.as_deref());
+        usage.local_group_id = local_group_id(&usage.groups, Some(&device_id));
         usage
     })
     .await
@@ -582,6 +600,28 @@ fn local_group_id(groups: &[UsageGroup], device_id: Option<&str>) -> Option<Stri
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn retained_snapshot_is_read_even_without_device_configuration() {
+        let f = Fixture::new();
+        let sync = f.0.join(".tokei/sync");
+        fs::create_dir_all(&sync).unwrap();
+        let snapshot = json!({"_device":"Previous-PC","_ts":Utc::now().timestamp(),
+            "_ledger":{"v":1,"tools":{"codex":{"2026-09-10":{"in":150,"cached":100,"out":20}}}}});
+        fs::write(
+            sync.join("Previous-PC.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let result = load_usage(&f.0, imported_groups(&Value::Null));
+        assert!(!f.0.join(".tokei/config.json").exists());
+        assert!(result.warnings.contains(&"config_unavailable".to_owned()));
+        assert_eq!(result.devices.len(), 1);
+        assert_eq!(result.devices[0].id, "Previous-PC");
+        assert_eq!(
+            result.devices[0].daily["2026-09-10"].metrics.total_tokens,
+            170
+        );
+    }
     #[test]
     fn default_person_follows_this_device_not_shared_default() {
         let groups = vec![
@@ -617,6 +657,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn fresh_member_bootstrap_preserves_existing_and_intentionally_empty_settings() {
+        let f = Fixture::new();
+        let data = f.0.join("app");
+        let fresh = bootstrap_local_groups(&data, &f.0, "Local-PC").unwrap();
+        assert_eq!(fresh.groups[0].device_ids, ["Local-PC"]);
+        assert_eq!(
+            fresh,
+            bootstrap_local_groups(&data, &f.0, "Another-PC").unwrap()
+        );
+        let empty = GroupSettings {
+            groups: vec![],
+            default_group_id: None,
+        };
+        save_groups(&data.join("usage-groups.json"), &empty).unwrap();
+        assert_eq!(
+            empty,
+            bootstrap_local_groups(&data, &f.0, "Local-PC").unwrap()
+        );
     }
     #[test]
     fn groups_persist_crud_and_recover_without_reimport() {

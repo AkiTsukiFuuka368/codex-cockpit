@@ -7,7 +7,7 @@ import App from "./App";
 import { EMPTY_RUNTIME_STATE } from "./lib/activity";
 import { DEFAULT_WIDGET_PREFERENCES } from "./lib/preferences";
 import type { ComfortFeedbackRecord, ProviderSnapshot, ResetForecast, ResetWatch, RuntimeState } from "./types";
-import { fetchCodexResetForecast, fetchWebsiteResetProbability, setWidgetExpanded, openControlCenterWindow } from "./lib/bridge";
+import { fetchCodexResetForecast, fetchWebsiteResetProbability, setWidgetExpanded, openControlCenterWindow, openExternalUrl } from "./lib/bridge";
 import type { TokeiUsage } from "./lib/tokeiUsage";
 import { savePersonPlan, planDateKey } from "./lib/personPlanSync";
 
@@ -41,12 +41,13 @@ vi.mock("./components/QuotaCard", () => ({
   capsuleLogicalWidth: () => 100,
   QuotaIsland: ({ onActivate }: { onActivate: () => void }) => <button onClick={onActivate}>expand</button>,
   QuotaOrb: ({ onActivate }: { onActivate: () => void }) => <button onClick={onActivate}>expand</button>,
-  QuotaCard: ({ onHover, onControlOpen, onRefresh, controlCenter, resetForecast, resetWatch, dailyRecommendation, onResetRiskChange, comfortPrompt }: { onHover: (value: boolean) => void; onControlOpen: () => void; onRefresh: () => void; controlCenter: React.ReactNode; resetForecast: ResetForecast | null; resetWatch: ResetWatch | null; dailyRecommendation: { resetRiskPercent: number } | null; onResetRiskChange: (value: number | null) => void; comfortPrompt: { localDate: string } | null }) => <div>
+  QuotaCard: ({ onHover, onControlOpen, onOpenResetForecast, onRefresh, controlCenter, resetForecast, resetWatch, dailyRecommendation, onResetRiskChange, comfortPrompt }: { onHover: (value: boolean) => void; onControlOpen: () => void; onOpenResetForecast: (url: string) => void; onRefresh: () => void; controlCenter: React.ReactNode; resetForecast: ResetForecast | null; resetWatch: ResetWatch | null; dailyRecommendation: { resetRiskPercent: number } | null; onResetRiskChange: (value: number | null) => void; comfortPrompt: { localDate: string } | null }) => <div>
     <button onClick={() => { onHover(false); onControlOpen(); }}>leave then open control</button>
+    <button onClick={() => onOpenResetForecast("https://codex-resets.com/")}>open reset watch</button>
     <button onClick={() => onHover(false)}>leave widget</button>
     <output data-testid="pending-comfort">{comfortPrompt?.localDate ?? "none"}</output>
     <button onClick={onRefresh}>quota refresh</button>
-    <output data-testid="reset-sources">{JSON.stringify({ model: resetForecast?.tomorrowRiskPercent, website: resetWatch?.resetChancePercent, planning: dailyRecommendation?.resetRiskPercent })}</output>
+    <output data-testid="reset-sources">{JSON.stringify({ model: resetForecast?.tomorrowRiskPercent, website: resetWatch?.resetChancePercent, signalKind: resetWatch?.signalKind, planning: dailyRecommendation?.resetRiskPercent })}</output>
     <button onClick={() => onResetRiskChange(70)}>manual risk</button>
     <button onClick={() => onResetRiskChange(null)}>website risk</button>
     {controlCenter}
@@ -219,6 +220,44 @@ async function expandApp(): Promise<void> {
 }
 
 describe("App comfort persistence regressions", () => {
+  it.each(["system", "smiley", "wenkai", "times", "fz-song"] as const)("applies the saved %s font to every app surface", async (fontFamily) => {
+    mocks.getPreferences.mockResolvedValue({ ...DEFAULT_WIDGET_PREFERENCES, fontFamily, fontScale: 1.75 });
+    await expandApp();
+    expect(document.documentElement.dataset.fontFamily).toBe(fontFamily);
+    expect(document.documentElement.style.getPropertyValue("--ui-font-scale")).toBe("1.75");
+  });
+
+  it("applies the persisted no-blur setting to every app surface", async () => {
+    mocks.getPreferences.mockResolvedValue({ ...DEFAULT_WIDGET_PREFERENCES, backgroundBlur: false });
+    await expandApp();
+    expect(document.documentElement.dataset.backgroundBlur).toBe("false");
+  });
+  it.each([null, 83])("shows a scheduled bell without replacing the planning probability %s", async (websiteChance) => {
+    const now = Date.now();
+    mocks.fetchSnapshots.mockResolvedValue([{ ...snapshot, updatedAt: new Date(now).toISOString(), weeklyWindow: { remainingPercent: 26, windowSeconds: 604800, resetsAt: new Date(now + 5 * 86_400_000).toISOString() } }]);
+    vi.mocked(fetchCodexResetForecast).mockResolvedValue({ score: 67.6, tomorrowRiskPercent: 67.6, windowHours: 24, fetchedAt: new Date(now).toISOString(), resetAnnounced: false, sourceUrl: "https://codex-resets.com/",
+      watchCheckedAt: new Date(now).toISOString(), activeWatch: { signalKind: "scheduled", level: "strong", resetChancePercent: null, observedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString() } });
+    if (websiteChance !== null) vi.mocked(fetchWebsiteResetProbability).mockResolvedValue({ level: "elevated", resetChancePercent: websiteChance, checkedAt: new Date(now).toISOString(), observedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), episodeId: "test-ballot" });
+    await expandApp();
+    expect(screen.getByTestId("reset-sources")).toHaveTextContent('"signalKind":"scheduled"');
+    expect(screen.getByTestId("reset-sources")).toHaveTextContent('"website":null');
+    expect(screen.getByTestId("reset-sources")).toHaveTextContent(`"planning":${websiteChance ?? 10}`);
+  });
+  it("does not leave an expired scheduled bell visible", async () => {
+    const now = Date.now();
+    vi.mocked(fetchCodexResetForecast).mockResolvedValue({ score: 67.6, tomorrowRiskPercent: 67.6, windowHours: 24, fetchedAt: new Date(now).toISOString(), resetAnnounced: false, sourceUrl: "https://codex-resets.com/",
+      watchCheckedAt: new Date(now).toISOString(), activeWatch: { signalKind: "scheduled", level: "strong", resetChancePercent: null, observedAt: new Date(now - 3_600_000).toISOString(), expiresAt: new Date(now - 60_000).toISOString() } });
+    await expandApp();
+    expect(screen.getByTestId("reset-sources")).not.toHaveTextContent('"signalKind":"scheduled"');
+  });
+  it("collapses after opening the reset-watch website even without mouseleave", async () => {
+    await expandApp();
+    await waitFor(() => expect(vi.mocked(setWidgetExpanded).mock.calls.some(call => call[0] === true)).toBe(true));
+    vi.mocked(setWidgetExpanded).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "open reset watch" }));
+    await waitFor(() => expect(openExternalUrl).toHaveBeenCalledWith("https://codex-resets.com/"));
+    await waitFor(() => expect(vi.mocked(setWidgetExpanded).mock.calls.some(call => call[0] === false)).toBe(true));
+  });
   it("collapses with an unanswered comfort check-in and shows it again on expand", async () => {
     mocks.initialRuntime = { ...structuredClone(EMPTY_RUNTIME_STATE), comfortPersonId: "person-a" };
     mocks.promptTarget = { localDate: LOCAL_DATE, isCatchUp: true };

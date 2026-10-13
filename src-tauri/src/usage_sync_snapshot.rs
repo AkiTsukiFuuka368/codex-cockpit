@@ -1,6 +1,6 @@
 //! Aggregates only. Project names, paths, session IDs and raw input never enter the wire format.
 use crate::{
-    codex_project_usage::ProjectUsageSnapshot,
+    codex_project_usage::{affects_token_coverage, ProjectUsageSnapshot},
     tokei_usage::{self, Metrics, UsagePeriod},
 };
 use chrono::{Datelike, Duration, Local, NaiveDate, Utc};
@@ -245,7 +245,11 @@ pub(crate) fn build_at(
         }
         if days.get(&date).is_none_or(|old| {
             (native_days.contains(&date)
-                || (collected.status == "ready" && collected.warnings.is_empty()))
+                || (collected.status == "ready"
+                    && !collected
+                        .warnings
+                        .iter()
+                        .any(|warning| affects_token_coverage(warning))))
                 && !(old.metrics.estimated_cost_usd.is_some()
                     && day.metrics.estimated_cost_usd.is_none())
                 && (day.metrics.total_tokens > old.metrics.total_tokens
@@ -551,11 +555,44 @@ mod tests {
         assert_eq!(parsed.daily["2026-09-10"].metrics.estimated_cost_usd, None);
     }
     #[test]
+    fn cost_only_warnings_do_not_freeze_complete_token_rescans() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        for warning in ["missing_model_price", "cost_context_unavailable"] {
+            let mut initial = fixture(100);
+            let day = initial.projects[0].daily.get_mut("2026-09-10").unwrap();
+            day.metrics.estimated_cost_usd = None;
+            day.models[0].metrics.estimated_cost_usd = None;
+            let mut baseline = build_at("device", &initial, &[], date).unwrap();
+            baseline.as_object_mut().unwrap().remove("_cockpit");
+            let mut scan = initial.clone();
+            scan.status = "ready".into();
+            scan.warnings = vec![warning.into()];
+            let day = scan.projects[0].daily.get_mut("2026-09-10").unwrap();
+            day.metrics.input_tokens = 200;
+            day.metrics.total_tokens = 200;
+            day.models[0].metrics = day.metrics.clone();
+            let result = build_at("device", &scan, &[baseline.clone()], date).unwrap();
+            let device = tokei_usage::parse_device(&result, "device", None).unwrap();
+            assert_eq!(device.daily["2026-09-10"].metrics.total_tokens, 200);
+            assert_eq!(device.daily["2026-09-10"].metrics.estimated_cost_usd, None);
+            assert_eq!(result["_cockpit"]["status"], "ready");
+
+            // A real scan failure still prevents replacing legacy history.
+            scan.warnings.push("scan_limit".into());
+            scan.status = "partial".into();
+            let partial = build_at("device", &scan, &[baseline], date).unwrap();
+            let device = tokei_usage::parse_device(&partial, "device", None).unwrap();
+            assert_eq!(device.daily["2026-09-10"].metrics.total_tokens, 100);
+        }
+    }
+
+    #[test]
     fn a_complete_rescan_cannot_erase_verified_historical_cost() {
         let date = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
         let baseline = build_at("device", &fixture(100), &[], date).unwrap();
         let mut scan = fixture(200);
         scan.status = "ready".into();
+        scan.warnings = vec!["cost_context_unavailable".into()];
         let day = scan.projects[0].daily.get_mut("2026-09-10").unwrap();
         day.metrics.estimated_cost_usd = None;
         day.models[0].metrics.estimated_cost_usd = None;

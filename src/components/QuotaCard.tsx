@@ -3,6 +3,7 @@ import { memo, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, typ
 import { clampPercent, formatDateTime, formatResetDate, formatResetTime, quotaTier } from "../lib/format";
 import { copy, normalizeLanguage, resetForecastLabel, resetForecastTitle } from "../lib/i18n";
 import { useModalDialog } from "../lib/modalDialog";
+import { useRingReadoutFit } from "../lib/useRingReadoutFit";
 import { normalizeProviderOrder, PROVIDER_CATALOG, type ProviderDefinition } from "../lib/providers";
 import { recentPercentageHistory, sortProviderIdsByRisk } from "../lib/providerPresentation";
 import { calculateQuotaPace, paceBaselineKey, trackedQuotaWindows, type NamedQuotaWindow, type QuotaPace, type QuotaPeriod } from "../lib/quotaPace";
@@ -61,6 +62,7 @@ interface Props {
   reconnecting?: boolean;
   recentCodexReset?: RecentCodexReset | null;
   resetWatch?: ResetWatch | null;
+  resetRiskSource?: "website" | "fallback";
   resetForecast?: ResetForecast | null;
   onOpenResetForecast?: (url: string) => void;
   paceBaselines?: Record<string, DailyPaceBaseline>;
@@ -136,14 +138,14 @@ function QuotaPaceHint({ pace, language, provider }: { pace: QuotaPace; language
 function TodayQuotaAdvicePanel({
   advice,
   language,
-  resetWatch,
+  riskSource,
   manualRisk,
   onRiskChange,
   onInteractionChange,
 }: {
   advice: TodayQuotaAdvice;
   language: Language;
-  resetWatch: ResetWatch | null;
+  riskSource: "website" | "fallback";
   manualRisk: boolean;
   onRiskChange: (value: number | null) => void;
   onInteractionChange: (active: boolean) => void;
@@ -167,9 +169,16 @@ function TodayQuotaAdvicePanel({
   const display = (value: number | null) => value === null ? "—" : `${number.format(value)}%`;
   const websiteProbability = advice.resetRiskPercent;
   const websiteLabel = language === "en" ? "Reset risk" : "重置风险";
-  const websiteHint = language === "en"
-    ? "Planning scenario: website community vote by default, with manual adjustment; not an official or calibrated 24h probability."
-    : "配额规划情景：默认网站公众投票，可手动微调；不是官方或校准后的24小时概率。";
+  const riskSourceLabel = manualRisk
+    ? (language === "en" ? "Manual" : "手动")
+    : riskSource === "website" ? (language === "en" ? "Website" : "网站") : null;
+  const websiteHint = !manualRisk && riskSource === "fallback"
+    ? (language === "en"
+      ? "No website risk value is available. Using the default planning reference; you can adjust it manually. This is not an official reset probability."
+      : "暂无网站风险数据，使用默认规划参考值；可手动调整。这不是官方重置概率。")
+    : (language === "en"
+      ? "Planning scenario: website community vote by default, with manual adjustment; not an official or calibrated 24h probability."
+      : "配额规划情景：默认网站公众投票，可手动微调；不是官方或校准后的24小时概率。");
   return (
     <section className={`today-quota-advice today-quota-advice--${advice.state}`} aria-label={t.officialSnapshot}>
       <header>
@@ -180,7 +189,7 @@ function TodayQuotaAdvicePanel({
         <div><span>{language === "en" ? "Suggested day total" : "今日总建议"}</span><strong>{display(advice.todaySuggestedPercent)}</strong></div>
         <div><span>{t.todayUsed}</span><strong>{display(advice.todayUsedPercent)}</strong></div>
         <div className="today-quota-advice-risk" title={websiteHint}>
-          <span>{websiteLabel} · {manualRisk ? (language === "en" ? "Manual" : "手动") : resetWatch ? (language === "en" ? "Website" : "网站") : (language === "en" ? "Fallback" : "备用")}</span>
+          <span>{websiteLabel}{riskSourceLabel ? ` · ${riskSourceLabel}` : ""}</span>
           <div className="reset-risk-value"><strong>{display(websiteProbability)}</strong><button type="button" aria-label={language === "en" ? "Restore website risk" : "恢复网站风险"} title={language === "en" ? "Follow website risk" : "恢复并跟随网站风险"} onClick={() => onRiskChange(null)}><ArrowClockwise /></button></div>
           <RangeSlider aria-label={websiteLabel} min={0} max={100} step={1} value={websiteProbability ?? 0} onChange={(event) => onRiskChange(Number(event.target.value))} onInteractionChange={onInteractionChange} />
         </div>
@@ -201,6 +210,8 @@ function QuotaRing({ label, value, progress, tone, caption, detail, footer, over
   innerProgress?: number | null;
   personCosts?: DailyPersonCosts;
 }) {
+  const readoutRef = useRef<HTMLDivElement>(null);
+  useRingReadoutFit(readoutRef, value, innerProgress !== undefined);
   const safeProgress = Math.max(0, Math.min(100, progress));
   const weeklyBand = tone === "weekly"
     ? safeProgress >= 50 ? "high" : safeProgress >= 20 ? "mid" : "low"
@@ -214,7 +225,7 @@ function QuotaRing({ label, value, progress, tone, caption, detail, footer, over
         <span><i aria-hidden="true" />{label}</span>
         <small>{tone === "weekly" ? "LIVE" : "PLAN"}</small>
       </header>
-      <div className="codex-ring-visual">
+      <div className={`codex-ring-visual${innerProgress !== undefined ? " codex-ring-visual--dual" : ""}`}>
         <svg viewBox="0 0 140 140" aria-hidden="true">
           <circle className="codex-ring-track" cx="70" cy="70" r="53" pathLength="100" />
           {personCosts ? <PersonCostArcs data={personCosts} progress={safeProgress} /> : <circle className="codex-ring-progress" cx="70" cy="70" r="53" pathLength="100" strokeDasharray={`${safeProgress} ${100 - safeProgress}`} />}
@@ -223,7 +234,7 @@ function QuotaRing({ label, value, progress, tone, caption, detail, footer, over
             <circle className="codex-ring-progress codex-ring-progress--five-hour" cx="70" cy="70" r="42" pathLength="100" strokeDasharray={`${innerProgress ?? 0} ${100 - (innerProgress ?? 0)}`} />
           </> : null}
         </svg>
-        <div className="codex-ring-value"><strong>{value}</strong>{value === "—" ? null : <span>%</span>}</div>
+        <div className="codex-ring-value" ref={readoutRef}><strong>{value}</strong>{value === "—" ? null : <span>%</span>}</div>
       </div>
       <div className="codex-ring-caption"><span>{caption}</span><strong>{detail}</strong></div>
       {footer ? <footer className="codex-ring-footer">{footer}</footer> : null}
@@ -550,6 +561,7 @@ export const QuotaCard = memo(function QuotaCard({
   reconnecting = false,
   recentCodexReset = null,
   resetWatch = null,
+  resetRiskSource,
   resetForecast = null,
   onOpenResetForecast = () => undefined,
   paceBaselines = {},
@@ -724,6 +736,7 @@ export const QuotaCard = memo(function QuotaCard({
     const plus = isCodexPlus(snapshot);
     const short = fiveHourWindow(snapshot);
     const shortRemaining = fiveHourRemaining(snapshot);
+    const hasFiveHour = plus && shortRemaining !== null;
     const focusWindow = quotaWindows.find(({ period }) => period === "weekly") ?? quotaWindows[0] ?? null;
     const focusRemaining = focusWindow ? clampPercent(focusWindow.window.remainingPercent) : null;
     const todayAdvice = buildTodayQuotaAdvice({
@@ -790,17 +803,17 @@ export const QuotaCard = memo(function QuotaCard({
             <>
               <div className="codex-focus-ring-grid">
                 <QuotaRing
-                  label={plus ? (language === "en" ? "5h remaining" : "5 小时剩余") : weeklyLabel}
-                  value={plus ? (shortRemaining === null ? "—" : number.format(shortRemaining)) : String(focusRemaining)}
-                  progress={plus ? snapshot.weeklyWindow?.remainingPercent ?? 0 : focusRemaining}
-                  innerProgress={plus ? shortRemaining : undefined}
+                  label={hasFiveHour ? (language === "en" ? "5h remaining" : "5 小时剩余") : weeklyLabel}
+                  value={hasFiveHour ? number.format(shortRemaining) : String(focusRemaining)}
+                  progress={hasFiveHour ? snapshot.weeklyWindow?.remainingPercent ?? 0 : focusRemaining}
+                  innerProgress={hasFiveHour ? shortRemaining : undefined}
                   tone="weekly"
-                  caption={plus ? (short ? formatResetTime(short.resetsAt, new Date(), language) : (language === "en" ? "5h data unavailable" : "5 小时额度暂不可用")) : formatResetTime(focusWindow.window.resetsAt, new Date(), language)}
-                  detail={plus ? (language === "en" ? "Inner 5h · outer week" : "内环 5h · 外环周") : (language === "en" ? "weekly cycle" : "周额度周期")}
+                  caption={hasFiveHour && short ? formatResetTime(short.resetsAt, new Date(), language) : formatResetTime(focusWindow.window.resetsAt, new Date(), language)}
+                  detail={hasFiveHour ? (language === "en" ? "Inner 5h · outer week" : "内环 5h · 外环周") : (language === "en" ? "weekly cycle" : "周额度周期")}
                   footer={(
                     <div className="weekly-reset-footer">
-                      {plus ? <span>{weeklyLabel} <strong>{snapshot.weeklyWindow ? number.format(snapshot.weeklyWindow.remainingPercent) + "%" : "—"}</strong></span> : null}
-                      <span>{plus ? (language === "en" ? "5h reset" : "5h 重置") : (language === "en" ? "Next reset" : "下次重置")} <strong>{focusResetDate(plus ? short?.resetsAt ?? null : focusWindow.window.resetsAt, language)}</strong></span>
+                      {hasFiveHour ? <span>{weeklyLabel} <strong>{snapshot.weeklyWindow ? number.format(snapshot.weeklyWindow.remainingPercent) + "%" : "—"}</strong></span> : null}
+                      <span>{hasFiveHour ? (language === "en" ? "5h reset" : "5h 重置") : (language === "en" ? "Next reset" : "下次重置")} <strong>{focusResetDate(hasFiveHour ? short?.resetsAt ?? null : focusWindow.window.resetsAt, language)}</strong></span>
                       <span>{language === "en" ? "Reset credits" : "重置机会"} <strong>{resetCreditsLabel}</strong></span>
                     </div>
                   )}
@@ -834,8 +847,8 @@ export const QuotaCard = memo(function QuotaCard({
                       </div>
                       {dailySuggested !== null ? (
                         <small className="daily-budget-recommendation">
-                          {language === "en" ? "Day total" : "今日总建议"} {number.format(dailySuggested)}%
-                          {todayAdvice.safetyCapPercent !== null ? ` · ${language === "en" ? "cycle cap" : "周期上限"} ${number.format(todayAdvice.safetyCapPercent)}%` : ""}
+                          <span>{language === "en" ? "Day total" : "今日总建议"} {number.format(dailySuggested)}%</span>
+                          {todayAdvice.safetyCapPercent !== null ? <span>{language === "en" ? "Cycle cap" : "周期上限"} {number.format(todayAdvice.safetyCapPercent)}%</span> : null}
                         </small>
                       ) : null}
                       <RangeSlider
@@ -858,7 +871,7 @@ export const QuotaCard = memo(function QuotaCard({
                 <TodayQuotaAdvicePanel
                   advice={todayAdvice}
                   language={language}
-                  resetWatch={resetWatch}
+                  riskSource={resetRiskSource ?? (resetWatch?.signalKind !== "scheduled" && resetWatch?.resetChancePercent != null ? "website" : "fallback")}
                   manualRisk={preferences.resetRiskManualEnabled === true}
                   onRiskChange={onResetRiskChange}
                   onInteractionChange={onSliderInteraction}
@@ -1155,9 +1168,9 @@ export function capsuleLogicalWidth(dailyRatio: number | null, fontScale = 1.15)
   return Math.ceil(Math.min(196, Math.max(88, 88 + Math.max(0, label.length - 3) * 10 * scale)));
 }
 
-function CapsuleQuotaRings({ remaining, dailyRatio, watchActive = false, shortRemaining }: { remaining: number; dailyRatio: number | null; watchActive?: boolean; shortRemaining?: number | null }) {
-  const dailyTone = shortRemaining !== undefined
-    ? shortRemaining !== null && shortRemaining <= 5 ? "over" : shortRemaining !== null && shortRemaining <= 20 ? "warning" : "normal"
+function CapsuleQuotaRings({ remaining, dailyRatio, watchActive = false, shortRemaining, valueKind = "used" }: { remaining: number; dailyRatio: number | null; watchActive?: boolean; shortRemaining?: number | null; valueKind?: "used" | "remaining" }) {
+  const dailyTone = valueKind === "remaining"
+    ? dailyRatio !== null && dailyRatio <= 5 ? "over" : dailyRatio !== null && dailyRatio <= 20 ? "warning" : "normal"
     : dailyRatio !== null && dailyRatio > 100
     ? "over"
     : dailyRatio !== null && dailyRatio >= 80
@@ -1218,15 +1231,18 @@ export const QuotaOrb = memo(function QuotaOrb({ snapshot, onDrag, onActivate = 
   const dailyBudgetUsageRatio = dailyUsageRatio(dailyUsed, dailyBudgetPercent);
   const plus = isCodexPlus(snapshot);
   const shortRemaining = fiveHourRemaining(snapshot);
-  const capsuleValue = plus ? shortRemaining : dailyBudgetUsageRatio;
+  const hasFiveHour = plus && shortRemaining !== null;
+  const capsuleValue = plus ? shortRemaining ?? remaining : dailyBudgetUsageRatio;
   const compactCapsuleWidth = compactLayout === "capsule" ? capsuleLogicalWidth(capsuleValue, fontScale) : null;
   const accessibleLabel = remaining !== null && orbQuota
     ? quotaAvailableLabel(orbQuota.period, remaining, activeLanguage)
     : unlimited
       ? (activeLanguage === "en" ? "Unlimited" : "不限量")
     : `${balance} ${snapshot.balanceUnit ?? ""}`.trim();
-  const capsuleAccessibleLabel = compactLayout === "capsule" && plus
+  const capsuleAccessibleLabel = compactLayout === "capsule" && hasFiveHour
     ? `${activeLanguage === "en" ? "5h remaining" : "5 小时剩余"} ${compactPercent(shortRemaining)}${shortRemaining === null ? "" : "%"}; ${accessibleLabel}`
+    : compactLayout === "capsule" && plus
+    ? accessibleLabel
     : compactLayout === "capsule" && remaining !== null
     ? `${accessibleLabel}; ${activeLanguage === "en" ? "Today's used / personal cap" : "今日已用/个人上限"} ${compactPercent(dailyBudgetUsageRatio)}${dailyBudgetUsageRatio === null ? "" : "%"}`
     : accessibleLabel;
@@ -1307,7 +1323,7 @@ export const QuotaOrb = memo(function QuotaOrb({ snapshot, onDrag, onActivate = 
     >
       <div className="aurora" aria-hidden="true" />
       {available && compactLayout === "capsule" && remaining !== null ? (
-        <CapsuleQuotaRings remaining={plus ? snapshot.weeklyWindow?.remainingPercent ?? 0 : remaining} dailyRatio={capsuleValue} shortRemaining={plus ? shortRemaining : undefined} watchActive={visibleWatch !== null} />
+        <CapsuleQuotaRings remaining={hasFiveHour ? snapshot.weeklyWindow?.remainingPercent ?? 0 : remaining} dailyRatio={capsuleValue} valueKind={plus ? "remaining" : "used"} shortRemaining={hasFiveHour ? shortRemaining : undefined} watchActive={visibleWatch !== null} />
       ) : available ? (
         <section className="orb-metric">
           <span>{remaining ?? compactBalance}</span>

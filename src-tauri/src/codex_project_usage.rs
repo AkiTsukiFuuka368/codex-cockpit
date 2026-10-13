@@ -24,6 +24,11 @@ const MAX_METADATA_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_METADATA_LINE: usize = 64 * 1024;
 const MAX_METADATA_SECONDS: u64 = 2;
 
+pub(crate) fn affects_token_coverage(warning: &str) -> bool {
+    !warning.starts_with("task_metadata_")
+        && !matches!(warning, "missing_model_price" | "cost_context_unavailable")
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ProjectUsage {
     pub id: String,
@@ -342,6 +347,7 @@ struct Rate {
 enum PricingOrigin {
     App,
     Tokei,
+    Builtin,
     #[default]
     None,
 }
@@ -351,6 +357,7 @@ impl PricingOrigin {
             Self::App => "app-catalog",
             // Preserve the public label used by the original local collector.
             Self::Tokei => "local-catalog",
+            Self::Builtin => "bundled-catalog",
             Self::None => "none",
         }
     }
@@ -372,13 +379,29 @@ struct PricingMeta {
     updated_at: Option<String>,
 }
 impl Pricing {
-    fn add_new_official_models(&mut self) {
-        // Standard short-context text rates per 1M tokens. Existing catalog
-        // entries and later local overrides take precedence over this fallback.
+    fn add_builtin_models(&mut self) {
+        // Offline Standard API-equivalent text rates per 1M tokens, checked
+        // against the exact official model pages on 2026-10-12. See
+        // docs/LOCAL-PRICING.md for sources and estimation limits.
+        // Existing catalog entries and local overrides take precedence.
         for (id, input, cache_read, output) in [
+            ("openai/gpt-6.1-sol", 2.0, 0.10, 10.0),
+            ("openai/gpt-6-astra", 10.0, 1.0, 50.0),
             ("openai/gpt-6-sol", 2.0, 0.20, 10.0),
             ("openai/gpt-6-luna", 0.10, 0.01, 0.50),
+            ("openai/gpt-5.6-sol", 4.0, 0.40, 20.0),
+            ("openai/gpt-5.6-terra", 2.0, 0.20, 12.0),
+            ("openai/gpt-5.6-luna", 0.20, 0.02, 1.20),
         ] {
+            let bare_id = id.strip_prefix("openai/").unwrap_or(id);
+            if self.models.contains_key(bare_id)
+                || self
+                    .models
+                    .values()
+                    .any(|rate| rate.canonical_slug.as_deref() == Some(bare_id))
+            {
+                continue;
+            }
             self.models.entry(id.into()).or_insert_with(|| Rate {
                 input: Some(input),
                 output: Some(output),
@@ -482,7 +505,7 @@ impl Pricing {
     }
 
     fn load(home: &Path, app_catalog: Option<&Path>) -> Self {
-        let (mut pricing, origin) = app_catalog
+        let (mut pricing, mut origin) = app_catalog
             .and_then(Self::read_catalog)
             .map(|pricing| (pricing, PricingOrigin::App))
             .or_else(|| {
@@ -490,7 +513,13 @@ impl Pricing {
                     .map(|pricing| (pricing, PricingOrigin::Tokei))
             })
             .unwrap_or_else(|| (Pricing::default(), PricingOrigin::None));
-        pricing.add_new_official_models();
+        pricing.add_builtin_models();
+        if origin == PricingOrigin::None {
+            origin = PricingOrigin::Builtin;
+            pricing.meta = Some(PricingMeta {
+                updated_at: Some("2026-10-12".into()),
+            });
+        }
         if !app_catalog.is_some_and(|p| p.file_name().is_some_and(|n| n == "cloud-pricing.json")) {
             if let Some(overrides) =
                 Self::read_overrides(&home.join(".tokei/pricing_overrides.json"))
@@ -506,17 +535,24 @@ impl Pricing {
         let pricing = Self::sanitize_catalog(Self::load(home, None))?;
         serde_json::to_value(pricing).ok()
     }
-    fn estimate(&self, model: &str, delta: Counts, last: Option<Counts>) -> Option<f64> {
+    fn rate(&self, model: &str) -> Option<&Rate> {
         let key = self.aliases.get(model).map(String::as_str).unwrap_or(model);
-        let rate = self
-            .models
+        self.models
             .get(key)
+            .or_else(|| {
+                key.strip_prefix("openai/")
+                    .and_then(|bare| self.models.get(bare))
+            })
             .or_else(|| self.models.get(&format!("openai/{key}")))
             .or_else(|| {
                 self.models
                     .values()
                     .find(|p| p.canonical_slug.as_deref() == Some(key))
-            })?;
+            })
+            .filter(|rate| Self::valid_rate(rate))
+    }
+    fn estimate(&self, model: &str, delta: Counts, last: Option<Counts>) -> Option<f64> {
+        let rate = self.rate(model)?;
         let valid = |p: Option<f64>| p.filter(|v| v.is_finite() && *v >= 0.0);
         let (input, output, cached) = (
             valid(rate.input)?,
@@ -883,6 +919,8 @@ impl Default for FileState {
 }
 #[derive(Default)]
 struct Index {
+    source_root: Option<PathBuf>,
+    scan_roots: Vec<PathBuf>,
     collector: Collector,
     files: BTreeMap<PathBuf, FileState>,
     metadata_loaded: HashSet<PathBuf>,
@@ -1121,6 +1159,7 @@ impl Collector {
                         self.warnings.insert("missing_totals".into());
                         continue;
                     };
+                    let first_observation = first_usage;
                     let delta = if first_usage && inherited_replay {
                         // A fork may start after its inherited cumulative baseline.
                         // Only the explicit first incremental count is attributable.
@@ -1136,7 +1175,7 @@ impl Collector {
                         self.warnings.insert("counter_reset".into());
                         continue;
                     };
-                    if delta.input_tokens == 0 && delta.output_tokens == 0 {
+                    if delta.input_tokens == 0 && delta.output_tokens == 0 && !first_observation {
                         continue;
                     }
                     let Some(time) = record
@@ -1177,8 +1216,21 @@ impl Collector {
                         models: vec![],
                     });
                     let mut metrics = delta.metrics();
-                    metrics.estimated_cost_usd =
-                        self.pricing.estimate(&model, delta, info.last_token_usage);
+                    metrics.estimated_cost_usd = if metrics.total_tokens == 0 {
+                        Some(0.0)
+                    } else {
+                        self.pricing.estimate(&model, delta, info.last_token_usage)
+                    };
+                    if metrics.estimated_cost_usd.is_none() {
+                        self.warnings.insert(
+                            if self.pricing.rate(&model).is_none() {
+                                "missing_model_price"
+                            } else {
+                                "cost_context_unavailable"
+                            }
+                            .into(),
+                        );
+                    }
                     add_daily(d, &model, &metrics);
                     let task = self.tasks.entry(task_id.clone()).or_default();
                     if owner.0 != "unassigned" {
@@ -1238,9 +1290,14 @@ fn files(
         warnings.insert("unsafe_source".into());
         return;
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        warnings.insert("directory_unavailable".into());
-        return;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // Either sessions directory can be absent on a normal fresh install.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            warnings.insert("source_permission_denied".into());
+            return;
+        }
     };
     let mut candidates = Vec::new();
     for entry in entries {
@@ -1399,6 +1456,8 @@ impl MetadataFileKey {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TaskMetadataKey {
+    source_root: PathBuf,
+    directory: MetadataFileKey,
     database: MetadataFileKey,
     database_wal: MetadataFileKey,
     session_index: MetadataFileKey,
@@ -1406,6 +1465,8 @@ struct TaskMetadataKey {
 impl TaskMetadataKey {
     fn from_codex(codex: &Path) -> Self {
         Self {
+            source_root: codex.to_path_buf(),
+            directory: MetadataFileKey::from_path(codex),
             database: MetadataFileKey::from_path(&codex.join("state_5.sqlite")),
             database_wal: MetadataFileKey::from_path(&codex.join("state_5.sqlite-wal")),
             session_index: MetadataFileKey::from_path(&codex.join("session_index.jsonl")),
@@ -1417,6 +1478,27 @@ struct CachedProjectUsage {
     pricing_key: PricingKey,
     task_metadata_key: TaskMetadataKey,
     snapshot: ProjectUsageSnapshot,
+    scan_roots: Vec<PathBuf>,
+}
+fn session_roots(_home: &Path, codex: &Path, _automatic: bool) -> Vec<PathBuf> {
+    let roots = vec![codex.to_path_buf()];
+    #[cfg(windows)]
+    let roots = {
+        let mut roots = roots;
+        let original = _home.join(".codex");
+        // Active older conversations may still append to their original store.
+        // A manually selected source remains an explicit, single-directory scope.
+        if _automatic
+            && codex.is_dir()
+            && original.is_dir()
+            && safe_path(&original)
+            && fs::canonicalize(&original).ok() != fs::canonicalize(codex).ok()
+        {
+            roots.push(original);
+        }
+        roots
+    };
+    roots
 }
 #[cfg(test)]
 fn collect_increment(home: &Path, codex: &Path, index: &mut Index) -> ProjectUsageSnapshot {
@@ -1428,6 +1510,14 @@ fn collect_increment_with_catalog(
     index: &mut Index,
     app_catalog: Option<&Path>,
 ) -> ProjectUsageSnapshot {
+    let roots = session_roots(home, codex, crate::local_usage::selected_root().is_none());
+    if index
+        .source_root
+        .as_deref()
+        .is_some_and(|root| root != codex || index.scan_roots != roots)
+    {
+        *index = Index::default();
+    }
     #[derive(Deserialize)]
     struct Config {
         device_id: Option<String>,
@@ -1455,11 +1545,32 @@ fn collect_increment_with_catalog(
         index.pricing_key = Some(pricing_key);
         index.collector.warnings.insert("source_reindexed".into());
     }
+    index.source_root = Some(codex.to_path_buf());
+    index.scan_roots = roots.clone();
     let c = &mut index.collector;
     c.bytes = 0;
     c.warnings.remove("scan_limit");
     c.warnings.remove("incomplete_record");
     c.warnings.remove("metadata_limit");
+    for warning in [
+        "codex_directory_missing",
+        "source_permission_denied",
+        "no_usage_records",
+    ] {
+        c.warnings.remove(warning);
+    }
+    match fs::metadata(codex) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            c.warnings.insert("codex_directory_missing".into());
+        }
+        Err(_) => {
+            c.warnings.insert("source_permission_denied".into());
+        }
+        Ok(meta) if !meta.is_dir() => {
+            c.warnings.insert("codex_directory_missing".into());
+        }
+        _ => {}
+    }
     c.warnings
         .retain(|warning| !warning.starts_with("task_metadata_"));
     let task_metadata = ThreadMetadataCatalog::load(codex);
@@ -1481,14 +1592,16 @@ fn collect_increment_with_catalog(
     }
     let mut paths = Vec::new();
     let mut remaining_entries = 20_000;
-    for name in ["sessions", "archived_sessions"] {
-        files(
-            &codex.join(name),
-            &mut paths,
-            0,
-            &mut c.warnings,
-            &mut remaining_entries,
-        );
+    for root in roots {
+        for name in ["sessions", "archived_sessions"] {
+            files(
+                &root.join(name),
+                &mut paths,
+                0,
+                &mut c.warnings,
+                &mut remaining_entries,
+            );
+        }
     }
     // Read only first-record metadata before usage so multi-level fork roots are
     // known independently of mtime ordering. Never parse or retain chat payloads.
@@ -1604,13 +1717,18 @@ fn collect_increment_with_catalog(
     } else {
         "partial"
     };
-    // Title/relationship metadata is a separate local-only failure domain. Its
-    // degradation must not make otherwise complete aggregate token data stale.
+    // Metadata and pricing are separate failure domains. Their degradation must
+    // not make otherwise complete aggregate token data stale.
     let usage_warnings = c
         .warnings
         .iter()
-        .any(|warning| !warning.starts_with("task_metadata_"));
+        .any(|warning| affects_token_coverage(warning));
     let status = if c.projects.is_empty() {
+        if !c.warnings.contains("codex_directory_missing")
+            && !c.warnings.contains("source_permission_denied")
+        {
+            c.warnings.insert("no_usage_records".into());
+        }
         "unavailable"
     } else if !usage_warnings {
         "ready"
@@ -1647,6 +1765,13 @@ pub async fn get_codex_project_usage() -> Result<ProjectUsageSnapshot, String> {
 pub async fn get_codex_project_usage_with_catalog(
     app_catalog: Option<PathBuf>,
 ) -> Result<ProjectUsageSnapshot, String> {
+    get_codex_project_usage_from_source(app_catalog, None).await
+}
+
+pub async fn get_codex_project_usage_from_source(
+    app_catalog: Option<PathBuf>,
+    source: Option<PathBuf>,
+) -> Result<ProjectUsageSnapshot, String> {
     static CACHE: OnceLock<Mutex<Option<CachedProjectUsage>>> = OnceLock::new();
     static INDEX: OnceLock<Mutex<Index>> = OnceLock::new();
     // A timed-out blocking filesystem operation must not create an unbounded
@@ -1663,14 +1788,20 @@ pub async fn get_codex_project_usage_with_catalog(
             return Err("unsafe_pricing_path".into());
         }
         let home = dirs::home_dir().ok_or_else(|| "home_unavailable".to_owned())?;
-        let codex = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
+        let codex = source
+            .or_else(|| {
+                std::env::var_os("CODEX_HOME")
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+            })
             .unwrap_or_else(|| home.join(".codex"));
         if !safe_path(&codex) {
             return Err("unsafe_source".into());
         }
         let pricing_key = PricingKey::from_path(app_catalog.as_deref());
         let task_metadata_key = TaskMetadataKey::from_codex(&codex);
+        let scan_roots =
+            session_roots(&home, &codex, crate::local_usage::selected_root().is_none());
         let mut cache = CACHE
             .get_or_init(|| Mutex::new(None))
             .lock()
@@ -1678,6 +1809,7 @@ pub async fn get_codex_project_usage_with_catalog(
         if let Some(cached) = cache.as_ref() {
             if cached.pricing_key == pricing_key
                 && cached.task_metadata_key == task_metadata_key
+                && cached.scan_roots == scan_roots
                 && cached.captured_at.elapsed()
                     < Duration::from_secs(
                         if cached
@@ -1706,6 +1838,7 @@ pub async fn get_codex_project_usage_with_catalog(
             pricing_key,
             task_metadata_key,
             snapshot: result.clone(),
+            scan_roots,
         });
         Ok(result)
     })
@@ -1716,6 +1849,115 @@ pub async fn get_codex_project_usage_with_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standalone_sessions_collect_tokens_without_tokei_or_sync() {
+        let home = metadata_fixture_dir("standalone");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        fs::create_dir_all(codex.join("archived_sessions")).unwrap();
+        fs::write(
+            codex.join("sessions/synthetic.jsonl"),
+            format!("{CONTEXT}\n{FIRST}\n{SECOND}\n"),
+        )
+        .unwrap();
+        let snapshot = collect_increment(&home, &codex, &mut Index::default());
+        assert_eq!(snapshot.scanned_files, 1);
+        assert_eq!(snapshot.device_id, None);
+        assert!(snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning == "device_identity_unavailable"));
+        assert_eq!(
+            snapshot
+                .projects
+                .iter()
+                .flat_map(|project| project.daily.values())
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>(),
+            170
+        );
+        assert!(!home.join(".tokei").exists());
+        assert!(!home.join("cloud-sync.json").exists());
+        assert!(!home.join("usage-sync-local.json").exists());
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("SECRET"));
+        fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn missing_source_empty_source_and_observed_zero_are_distinct() {
+        let dir = metadata_fixture_dir("empty-source");
+        let missing = collect_increment(&dir, &dir.join("absent"), &mut Index::default());
+        assert!(missing
+            .warnings
+            .iter()
+            .any(|w| w == "codex_directory_missing"));
+        assert_eq!(missing.status, "unavailable");
+        let empty = collect_increment(&dir, &dir, &mut Index::default());
+        assert!(empty.warnings.iter().any(|w| w == "no_usage_records"));
+        assert!(!empty
+            .warnings
+            .iter()
+            .any(|w| w == "source_permission_denied"));
+        let zero = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}"#;
+        let observed = run(&[CONTEXT, zero]);
+        let day = observed
+            .projects
+            .values()
+            .next()
+            .unwrap()
+            .daily
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(day.metrics.total_tokens, 0);
+        assert_eq!(day.metrics.estimated_cost_usd, Some(0.0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn switching_source_never_reuses_the_previous_directory_index() {
+        let dir = metadata_fixture_dir("switch-source");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::create_dir_all(a.join("sessions")).unwrap();
+        fs::create_dir_all(b.join("sessions")).unwrap();
+        fs::write(a.join("sessions/a.jsonl"), format!("{CONTEXT}\n{FIRST}\n")).unwrap();
+        fs::write(
+            b.join("sessions/b.jsonl"),
+            format!(
+                "{CONTEXT}\n{}\n",
+                FIRST.replace("\"input_tokens\":100", "\"input_tokens\":200")
+            ),
+        )
+        .unwrap();
+        let mut index = Index::default();
+        let before = collect_increment(&dir, &a, &mut index);
+        let after = collect_increment(&dir, &b, &mut index);
+        assert_ne!(
+            TaskMetadataKey::from_codex(&a),
+            TaskMetadataKey::from_codex(&b)
+        );
+        assert_eq!(
+            before.projects[0]
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            110
+        );
+        assert_eq!(
+            after.projects[0]
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            210
+        );
+        assert_eq!(after.scanned_files, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[cfg(unix)]
     #[test]
     fn short_metadata_rejects_fifo_before_opening() {
@@ -2130,6 +2372,54 @@ mod tests {
         fs::create_dir_all(&raw).unwrap();
         fs::canonicalize(raw).unwrap()
     }
+    #[cfg(windows)]
+    #[test]
+    fn windows_migration_reads_active_originals_once_and_keeps_manual_source_scoped() {
+        let home = metadata_fixture_dir("windows-migration");
+        let codex = home.join("moved-codex");
+        let original = home.join(".codex");
+        for root in [&codex, &original] {
+            fs::create_dir_all(root.join("sessions")).unwrap();
+            fs::create_dir_all(root.join("archived_sessions")).unwrap();
+        }
+        let meta = r#"{"type":"session_meta","payload":{"id":"migrated-thread"}}"#;
+        let copied = format!("{meta}\n{CONTEXT}\n{FIRST}\n");
+        let active = format!("{copied}{SECOND}\n");
+        fs::write(codex.join("sessions/copy.jsonl"), &copied).unwrap();
+        fs::write(original.join("sessions/active.jsonl"), &active).unwrap();
+        fs::write(original.join("archived_sessions/duplicate.jsonl"), &active).unwrap();
+        let other = r#"{"type":"session_meta","payload":{"id":"other-thread"}}"#;
+        fs::write(
+            original.join("sessions/other.jsonl"),
+            format!("{other}\n{CONTEXT}\n{FIRST}\n"),
+        )
+        .unwrap();
+        let mut index = Index::default();
+        let first = collect_increment(&home, &codex, &mut index);
+        let total = |id: &str| {
+            first
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .unwrap()
+                .daily
+                .values()
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>()
+        };
+        assert_eq!(total("migrated-thread"), 170);
+        assert_eq!(total("other-thread"), 110);
+        let second = collect_increment(&home, &codex, &mut index);
+        assert_eq!(
+            serde_json::to_value(&first.tasks).unwrap(),
+            serde_json::to_value(&second.tasks).unwrap()
+        );
+        assert_eq!(session_roots(&home, &codex, false), vec![codex.clone()]);
+        assert_eq!(session_roots(&home, &original, true), vec![original]);
+        assert_eq!(session_roots(&home, &home.join("missing"), true).len(), 1);
+        assert!(!serde_json::to_string(&first).unwrap().contains("SECRET"));
+        fs::remove_dir_all(home).unwrap();
+    }
     fn create_metadata_database(codex: &Path) -> Connection {
         let connection = Connection::open(codex.join("state_5.sqlite")).unwrap();
         connection
@@ -2451,6 +2741,9 @@ mod tests {
             reasoning_output_tokens: 10_000,
         };
         let official = Pricing::load(&temp, None);
+        for id in ["gpt-6.1-sol", "openai/gpt-6.1-sol"] {
+            assert!((official.estimate(id, counts, Some(counts)).unwrap() - 0.505).abs() < 1e-10);
+        }
         assert!(
             (official
                 .estimate("gpt-6-sol", counts, Some(counts))
@@ -2478,7 +2771,9 @@ mod tests {
             ..counts
         };
         assert!((pricing.estimate("gpt-6-luna", high, Some(high)).unwrap() - 0.066).abs() < 1e-10);
+        assert!((pricing.estimate("gpt-6.1-sol", high, Some(high)).unwrap() - 1.31).abs() < 1e-10);
         let exported = shared_pricing_export(&temp, &catalog).unwrap();
+        assert_eq!(exported["models"]["openai/gpt-6.1-sol"]["cache_read"], 0.1);
         assert_eq!(exported["models"]["openai/gpt-6-luna"]["out"], 0.5);
         fs::create_dir_all(temp.join(".tokei")).unwrap();
         fs::write(
@@ -2490,7 +2785,252 @@ mod tests {
         fs::write(&cloud_catalog, serde_json::to_vec(&exported).unwrap()).unwrap();
         let peer = Pricing::load(&temp, Some(&cloud_catalog));
         assert_eq!(peer.models["openai/gpt-6-luna"].output, Some(0.5));
+        assert!(
+            (peer.estimate("gpt-6.1-sol", counts, Some(counts)).unwrap() - 0.505).abs() < 1e-10
+        );
         fs::remove_dir_all(temp).unwrap();
+    }
+    #[test]
+    fn fresh_install_prices_supported_models_without_legacy_or_sync() {
+        let home = metadata_fixture_dir("fresh-pricing");
+        let pricing = Pricing::load(&home, Some(&home.join("app/usage-prices.json")));
+        assert_eq!(pricing.origin, PricingOrigin::Builtin);
+        assert_eq!(pricing.origin.label(), "bundled-catalog");
+        assert_eq!(
+            pricing.meta.as_ref().unwrap().updated_at.as_deref(),
+            Some("2026-10-12")
+        );
+        let counts = Counts {
+            input_tokens: 200_000,
+            cached_input_tokens: 50_000,
+            output_tokens: 20_000,
+            reasoning_output_tokens: 10_000,
+        };
+        for (model, expected) in [
+            ("gpt-6.1-sol", 0.505),
+            ("gpt-6-astra", 2.55),
+            ("gpt-6-sol", 0.51),
+            ("gpt-6-luna", 0.0255),
+            ("gpt-5.6-sol", 1.02),
+            ("gpt-5.6-terra", 0.55),
+            ("gpt-5.6-luna", 0.055),
+        ] {
+            for id in [model.to_owned(), format!("openai/{model}")] {
+                assert!(
+                    (pricing.estimate(&id, counts, Some(counts)).unwrap() - expected).abs() < 1e-10,
+                    "{id}"
+                );
+            }
+        }
+        for model in [
+            "gpt-6",
+            "gpt-6.1",
+            "gpt-6.1-sol-unknown",
+            "other/gpt-6-astra",
+        ] {
+            assert!(pricing.estimate(model, counts, Some(counts)).is_none());
+        }
+        assert!(!home.join(".tokei").exists());
+        assert!(!home.join("app").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn fresh_session_prices_the_reported_three_models_and_survives_a_second_scan() {
+        let home = metadata_fixture_dir("fresh-priced-session");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        let mut records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":"synthetic-cost-task","cwd":"/synthetic/repo","message":"DO_NOT_EXPORT"}}),
+        ];
+        for (index, model) in ["gpt-5.6-luna", "gpt-6-astra", "gpt-6.1-sol"]
+            .into_iter()
+            .enumerate()
+        {
+            let requests = (index + 1) as u64;
+            records.push(serde_json::json!({"type":"turn_context","payload":{"model":model}}));
+            records.push(serde_json::json!({
+                "timestamp":format!("2026-01-01T0{index}:00:00Z"),
+                "type":"event_msg",
+                "payload":{"type":"token_count","info":{
+                    "total_token_usage":{
+                        "input_tokens":200_000 * requests,
+                        "cached_input_tokens":50_000 * requests,
+                        "output_tokens":20_000 * requests,
+                        "reasoning_output_tokens":10_000 * requests
+                    },
+                    "last_token_usage":{
+                        "input_tokens":200_000,"cached_input_tokens":50_000,
+                        "output_tokens":20_000,"reasoning_output_tokens":10_000
+                    }
+                }}
+            }));
+        }
+        let lines = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(codex.join("sessions/costs.jsonl"), format!("{lines}\n")).unwrap();
+        let mut index = Index::default();
+        for _ in 0..2 {
+            let result = collect_increment(&home, &codex, &mut index);
+            assert_eq!(result.pricing_source, "bundled-catalog");
+            assert!(!result
+                .warnings
+                .iter()
+                .any(|warning| warning == "missing_model_price"
+                    || warning == "cost_context_unavailable"));
+            let day = result.projects[0].daily.values().next().unwrap();
+            assert_eq!(day.metrics.total_tokens, 660_000);
+            assert!((day.metrics.estimated_cost_usd.unwrap() - 3.11).abs() < 1e-10);
+            assert_eq!(day.models.len(), 3);
+            assert!(day
+                .models
+                .iter()
+                .all(|row| row.metrics.estimated_cost_usd.is_some()));
+            assert_eq!(
+                result.tasks[0]
+                    .daily
+                    .values()
+                    .next()
+                    .unwrap()
+                    .metrics
+                    .estimated_cost_usd,
+                day.metrics.estimated_cost_usd
+            );
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains("DO_NOT_EXPORT"));
+            assert!(!serialized.contains("/synthetic/repo"));
+        }
+        assert!(!home.join(".tokei").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn builtin_prices_preserve_custom_bare_ids_aliases_and_cloud_prices() {
+        let home = metadata_fixture_dir("custom-builtin-price");
+        let catalog = home.join("cloud-pricing.json");
+        fs::write(
+            &catalog,
+            r#"{"models":{"gpt-6.1-sol":{"in":8.0,"out":40.0,"cache_read":0.8}},"aliases":{"custom-sol":"gpt-6.1-sol"}}"#,
+        ).unwrap();
+        fs::create_dir_all(home.join(".tokei")).unwrap();
+        fs::write(
+            home.join(".tokei/pricing_overrides.json"),
+            r#"{"models":{"gpt-6.1-sol":{"out":999.0}}}"#,
+        )
+        .unwrap();
+        let pricing = Pricing::load(&home, Some(&catalog));
+        assert_eq!(pricing.origin, PricingOrigin::App);
+        assert_eq!(pricing.rate("gpt-6.1-sol").unwrap().output, Some(40.0));
+        assert_eq!(
+            pricing.rate("openai/gpt-6.1-sol").unwrap().output,
+            Some(40.0)
+        );
+        assert_eq!(pricing.rate("custom-sol").unwrap().input, Some(8.0));
+        assert_eq!(pricing.rate("gpt-6-astra").unwrap().input, Some(10.0));
+        assert_eq!(
+            fs::read_to_string(&catalog).unwrap(),
+            r#"{"models":{"gpt-6.1-sol":{"in":8.0,"out":40.0,"cache_read":0.8}},"aliases":{"custom-sol":"gpt-6.1-sol"}}"#
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pricing_diagnostics_do_not_mark_complete_token_records_as_partial() {
+        for warning in [
+            "missing_model_price",
+            "cost_context_unavailable",
+            "task_metadata_unavailable",
+        ] {
+            assert!(!affects_token_coverage(warning), "{warning}");
+        }
+        for warning in [
+            "scan_limit",
+            "file_unavailable",
+            "source_permission_denied",
+            "missing_totals",
+        ] {
+            assert!(affects_token_coverage(warning), "{warning}");
+        }
+    }
+
+    #[test]
+    fn missing_prices_and_missing_context_remain_distinct_from_zero() {
+        let home = metadata_fixture_dir("cost-reasons");
+        let pricing = Pricing::load(&home, None);
+        let event = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":5}}}}"#;
+        let unknown = run_with_pricing(&[CONTEXT, event], pricing.clone());
+        assert!(unknown.warnings.contains("missing_model_price"));
+        assert!(!unknown.warnings.contains("cost_context_unavailable"));
+        let context =
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","cwd":"/synthetic/repo"}}"#;
+        let no_context = run_with_pricing(&[context, FIRST], pricing.clone());
+        assert!(no_context.warnings.contains("cost_context_unavailable"));
+        assert!(!no_context.warnings.contains("missing_model_price"));
+        for collected in [unknown, no_context] {
+            let day = collected
+                .projects
+                .values()
+                .next()
+                .unwrap()
+                .daily
+                .values()
+                .next()
+                .unwrap();
+            assert_eq!(day.metrics.total_tokens, 110);
+            assert_eq!(day.metrics.estimated_cost_usd, None);
+        }
+        let zero = event
+            .replace("\"input_tokens\":100", "\"input_tokens\":0")
+            .replace("\"cached_input_tokens\":80", "\"cached_input_tokens\":0")
+            .replace("\"output_tokens\":10", "\"output_tokens\":0")
+            .replace(
+                "\"reasoning_output_tokens\":5",
+                "\"reasoning_output_tokens\":0",
+            );
+        let observed = run_with_pricing(&[context, &zero], pricing);
+        assert!(!observed.warnings.contains("missing_model_price"));
+        assert!(!observed.warnings.contains("cost_context_unavailable"));
+        assert_eq!(
+            observed
+                .projects
+                .values()
+                .next()
+                .unwrap()
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .estimated_cost_usd,
+            Some(0.0)
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn builtin_sol_pricing_checks_the_exact_long_context_boundary() {
+        let home = metadata_fixture_dir("builtin-context-boundary");
+        let pricing = Pricing::load(&home, None);
+        let base = Counts {
+            input_tokens: 272_000,
+            cached_input_tokens: 50_000,
+            output_tokens: 20_000,
+            reasoning_output_tokens: 10_000,
+        };
+        assert!((pricing.estimate("gpt-6.1-sol", base, Some(base)).unwrap() - 0.649).abs() < 1e-10);
+        let long = Counts {
+            input_tokens: 272_001,
+            ..base
+        };
+        assert!(
+            (pricing.estimate("gpt-6.1-sol", long, Some(long)).unwrap() - 1.198004).abs() < 1e-10
+        );
+        assert!(pricing.estimate("gpt-6.1-sol", long, None).is_none());
+        assert!(pricing.estimate("gpt-6.1-sol", long, Some(base)).is_none());
+        fs::remove_dir_all(home).unwrap();
     }
     #[test]
     fn app_catalog_precedes_legacy_and_overrides_are_preserved() {
@@ -2675,7 +3215,7 @@ mod tests {
             &mut warnings,
             &mut 20,
         );
-        assert!(warnings.contains("directory_unavailable"));
+        assert!(!warnings.contains("directory_unavailable"));
         let meta = fs::metadata(temp.join("2026/new.jsonl")).unwrap();
         let state = FileState {
             source_length: Some(meta.len()),

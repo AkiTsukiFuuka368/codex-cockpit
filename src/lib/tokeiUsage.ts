@@ -29,6 +29,8 @@ export interface TokeiDevice {
   updatedAt: string | null;
   stale: boolean;
   collectionPartial?: boolean;
+  /** A newer, in-memory local scan supersedes this device's synced ranges. */
+  liveLocal?: boolean;
   daily: Record<string, DailyModelUsage>;
   ranges: Record<string, DailyModelUsage & { start: string | null; end: string | null }>;
 }
@@ -85,6 +87,43 @@ export interface ProjectUsageSnapshot {
   tasks?: TaskUsage[];
   peerTasks?: { deviceId: string; updatedAt: string; partial: boolean; tasks: TaskUsage[] }[];
   warnings: string[];
+}
+
+/** Keep the local model ledger on the same scan as task details; peer snapshots stay untouched. */
+export function withLiveLocalUsage(data: TokeiUsage, projects: ProjectUsageSnapshot | null): TokeiUsage {
+  if (!projects?.deviceId || projects.status === "unavailable" || !projects.projects.length) return data;
+  const existing = data.devices.find(device => device.id === projects.deviceId);
+  // Never replace a saved complete ledger with a partial history-scan prefix.
+  if (existing && projects.warnings.includes("scan_limit")) return data;
+  if (!Number.isFinite(Date.parse(projects.updatedAt)) || existing && Date.parse(projects.updatedAt) <= Date.parse(existing.updatedAt ?? "")) return data;
+  const daily = new Map<string, DailyModelUsage>();
+  for (const project of projects.projects) for (const [date, source] of Object.entries(project.daily)) {
+    const target = daily.get(date) ?? { ...ZERO, models: [] };
+    addMetrics(target, source);
+    const models = new Map(target.models.map(model => [canonicalModelId(model.id), model]));
+    for (const model of source.models) addModel(models, model);
+    target.models = [...models.values()];
+    daily.set(date, target);
+  }
+  if (!daily.size) return data;
+  for (const [date, observed] of daily) {
+    const cached = existing?.daily[date];
+    if (cached && cached.totalTokens > observed.totalTokens) daily.set(date, cached);
+  }
+  const local = {
+    ...(existing ?? { id: projects.deviceId, daily: {}, ranges: {} }),
+    updatedAt: projects.updatedAt, stale: false, collectionPartial: projects.status !== "ready",
+    liveLocal: true, daily: { ...existing?.daily, ...Object.fromEntries(daily) },
+  };
+  const firstLocalRead = !data.devices.length;
+  // No Tokei or cloud setup is needed once native collection identifies and
+  // reads this device. Keep real collection/pricing diagnostics, not obsolete
+  // "sync not configured" warnings. Never invent an identity in the frontend.
+  const warnings = firstLocalRead
+    ? [...new Set([...data.warnings.filter(warning => warning !== "config_unavailable" && warning !== "sync_unavailable"), ...projects.warnings])]
+    : data.warnings;
+  return { ...data, status: firstLocalRead ? projects.status : data.status, warnings,
+    devices: existing ? data.devices.map(device => device.id === projects.deviceId ? local : device) : [...data.devices, local] };
 }
 
 export type TaskRelation = "root" | "subagent" | "fork" | "unlinked";
@@ -333,6 +372,7 @@ export function selectDeviceUsage(device: TokeiDevice, period: UsagePeriod, now 
   const today = localDateKey(now);
   const daily = Object.entries(device.daily).filter(([date]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date >= start && date <= today).map(([, day]) => day);
   const dailyTotal = daily.reduce((sum, day) => sum + day.totalTokens, 0);
+  if (device.liveLocal && daily.length) return { records: daily, source: "daily" };
   const updated = Date.parse(device.updatedAt ?? "");
   if (!Number.isFinite(updated) || updated > now.getTime() + 300000) return daily.length ? { records: daily, source: "daily" } : { records: [], source: "none" };
   const end = periodEndExclusive(period, now);

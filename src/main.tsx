@@ -4,6 +4,10 @@ import App from "./App";
 import { DesignPlayground } from "./components/DesignPlayground";
 import "./styles.css";
 
+document.documentElement.dataset.platform = /Windows/i.test(navigator.userAgent)
+  ? "windows"
+  : /Macintosh|Mac OS X/i.test(navigator.userAgent) ? "macos" : "other";
+
 function BrowserPreview() {
   return (
     <div className="browser-preview-shell">

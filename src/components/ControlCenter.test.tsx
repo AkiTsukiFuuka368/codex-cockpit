@@ -9,6 +9,35 @@ import { ControlCenter } from "./ControlCenter";
 import { buildMidnightQuotaPlan } from "../lib/midnightQuotaPlan";
 import { COMFORT_CURVE_VERSION } from "../lib/comfortFeedback";
 import type { ComfortFeedbackRecord } from "../types";
+import { UI_FONT_OPTIONS } from "../lib/fonts";
+
+it.each(["en", "zh-CN"] as const)("offers the requested fonts, with clear local-font fallback guidance in %s", (language) => {
+  const onPreferences = vi.fn();
+  const preferences = { ...DEFAULT_WIDGET_PREFERENCES, language, fontFamily: "smiley" as const, fontScale: 1.75 };
+  const props = { preferences, language, onClose: vi.fn(), onRefresh: vi.fn(), onPreferences, autostartEnabled: false, onAutostart: vi.fn() };
+  const view = render(<ControlCenter {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: language === "en" ? "Settings" : "设置" }));
+  const fontSelect = screen.getByRole("combobox", { name: language === "en" ? "Font" : "字体" });
+  expect(fontSelect).toHaveValue("smiley");
+  expect(fontSelect).not.toHaveAttribute("aria-describedby");
+  expect(screen.getByRole("slider", { name: language === "en" ? "Text size" : "字大小" })).toHaveAttribute("value", "1.75");
+  expect(screen.queryByLabelText(language === "en" ? "Font preview" : "字体预览")).not.toBeInTheDocument();
+  expect(screen.queryByText(language === "en" ? "Codex Cockpit · Used today 12.5%" : "Codex 驾驶舱 · 今日已用 12.5%")).not.toBeInTheDocument();
+  expect(screen.queryByText(language === "en" ? "Applies immediately without changing the text size." : "切换后立即生效，字号保持不变。")).not.toBeInTheDocument();
+  expect(view.container.querySelector(".minimal-font-preview")).toBeNull();
+  expect(Array.from(fontSelect.querySelectorAll("option")).map(option => option.value)).toEqual(UI_FONT_OPTIONS.map(option => option.id));
+  for (const { id } of UI_FONT_OPTIONS) {
+    fireEvent.change(fontSelect, { target: { value: id } });
+    expect(onPreferences).toHaveBeenLastCalledWith(expect.objectContaining({ fontFamily: id, fontScale: 1.75 }));
+  }
+  for (const fontFamily of ["yahei", "times", "fz-song"] as const) {
+    view.rerender(<ControlCenter {...props} preferences={{ ...preferences, fontFamily }} />);
+    expect(screen.getByRole("combobox", { name: language === "en" ? "Font" : "字体" })).toHaveValue(fontFamily);
+    expect(screen.getByRole("combobox", { name: language === "en" ? "Font" : "字体" })).toHaveAccessibleDescription(language === "en"
+      ? "Requires a local installation and falls back to the system font. Commercial font files are not bundled."
+      : "需在本机安装；未安装时自动使用系统字体。本应用不打包商业字体。");
+  }
+});
 
 it("puts Usage first in the control center navigation", () => {
   render(<ControlCenter preferences={DEFAULT_WIDGET_PREFERENCES} language="zh-CN" onClose={() => {}} onRefresh={() => {}} onPreferences={() => {}} autostartEnabled={false} onAutostart={() => {}} />);
@@ -240,6 +269,9 @@ describe("ControlCenter essentials", () => {
 
     fireEvent.click(screen.getByRole("radio", { name: /^Dark$/i }));
     expect(onPreferences).toHaveBeenCalledWith(expect.objectContaining({ appearanceMode: "dark" }));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Background blur" }));
+    expect(onPreferences).toHaveBeenCalledWith(expect.objectContaining({ backgroundBlur: false }));
 
     fireEvent.click(screen.getByRole("radio", { name: "中文" }));
     expect(onPreferences).toHaveBeenCalledWith(expect.objectContaining({ language: "zh-CN" }));

@@ -7,6 +7,9 @@ const RESETS_API_URL: &str = "https://codex-resets.com/api/v1/resets?limit=100&o
 const FORECAST_SOURCE_URL: &str = "https://codex-reset-risk-dashboard.xr08255920.workers.dev/";
 const FUTURE_TOLERANCE_MINUTES: i64 = 5;
 const DUPLICATE_WINDOW_MINUTES: i64 = 5;
+const MAX_SCHEDULE_WINDOW_HOURS: i64 = 72;
+const ANNOUNCEMENT_AUTHOR: &str = "thsottiaux";
+const ANNOUNCEMENT_URL_PREFIX: &str = "https://x.com/thsottiaux/status/";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +41,7 @@ pub struct ResetForecast {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetWatch {
+    pub signal_kind: String,
     pub level: String,
     pub reset_chance_percent: Option<u8>,
     pub observed_at: String,
@@ -58,6 +62,8 @@ struct StatusData {
     latest_reset: Option<ResetRecord>,
     #[serde(default)]
     active_watch: Option<Watch>,
+    #[serde(default)]
+    scheduled_reset: Option<ScheduledReset>,
 }
 
 #[derive(Default, Deserialize)]
@@ -82,6 +88,32 @@ struct Watch {
     observed_at: String,
     #[serde(default)]
     expires_at: String,
+}
+
+#[derive(Default, Deserialize)]
+struct ScheduledReset {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    reset_type: String,
+    #[serde(default)]
+    announced_at: String,
+    #[serde(default)]
+    scheduled_for: String,
+    #[serde(default)]
+    source: AnnouncementSource,
+}
+
+#[derive(Default, Deserialize)]
+struct AnnouncementSource {
+    #[serde(rename = "type", default)]
+    source_type: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    url: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -256,10 +288,43 @@ fn active_watch(watch: Option<&Watch>, now: DateTime<Utc>) -> Option<ResetWatch>
         return None;
     }
     Some(ResetWatch {
+        signal_kind: "watch".into(),
         level: watch.level.clone(),
         reset_chance_percent: watch.reset_chance_percent,
         observed_at: observed.to_rfc3339_opts(SecondsFormat::Millis, true),
         expires_at: expires.to_rfc3339_opts(SecondsFormat::Millis, true),
+    })
+}
+
+fn scheduled_signal(scheduled: Option<&ScheduledReset>, now: DateTime<Utc>) -> Option<ResetWatch> {
+    let scheduled = scheduled?;
+    let announced = parse_utc(&scheduled.announced_at)?;
+    let scheduled_for = parse_utc(&scheduled.scheduled_for)?;
+    let expected_url = format!("{ANNOUNCEMENT_URL_PREFIX}{}", scheduled.id);
+    if scheduled.status != "scheduled"
+        || !matches!(scheduled.reset_type.as_str(), "regular" | "banked")
+        || scheduled.id.is_empty()
+        || scheduled.id.len() > 32
+        || !scheduled
+            .id
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        || scheduled.source.source_type != "x_post"
+        || scheduled.source.author != ANNOUNCEMENT_AUTHOR
+        || scheduled.source.url != expected_url
+        || announced > now + ChronoDuration::minutes(FUTURE_TOLERANCE_MINUTES)
+        || scheduled_for <= now
+        || scheduled_for <= announced
+        || scheduled_for > announced + ChronoDuration::hours(MAX_SCHEDULE_WINDOW_HOURS)
+    {
+        return None;
+    }
+    Some(ResetWatch {
+        signal_kind: "scheduled".into(),
+        level: "strong".into(),
+        reset_chance_percent: None,
+        observed_at: announced.to_rfc3339_opts(SecondsFormat::Millis, true),
+        expires_at: scheduled_for.to_rfc3339_opts(SecondsFormat::Millis, true),
     })
 }
 
@@ -268,7 +333,8 @@ fn normalize_at(
     resets: ResetListResponse,
     now: DateTime<Utc>,
 ) -> ResetForecast {
-    let active_watch = active_watch(status.data.active_watch.as_ref(), now);
+    let active_watch = scheduled_signal(status.data.scheduled_reset.as_ref(), now)
+        .or_else(|| active_watch(status.data.active_watch.as_ref(), now));
     let as_of = parse_utc(&status.meta.generated_at).unwrap_or_else(Utc::now);
     let history_reset_dates = sanitize_history(
         resets.data.into_iter().map(|item| item.announced_at),
@@ -350,10 +416,77 @@ mod tests {
             )).unwrap();
             let result = super::normalize_at(status, ResetListResponse::default(), now);
             let watch = result.active_watch.unwrap();
+            assert_eq!(watch.signal_kind, "watch");
             assert_eq!(watch.level, level);
             assert_eq!(watch.expires_at, "2026-09-10T05:00:00.000Z");
             assert_eq!(result.watch_checked_at, "2026-09-09T06:00:00.000Z");
         }
+    }
+
+    #[test]
+    fn exposes_allowlisted_scheduled_announcement_without_changing_calibration() {
+        let now = super::parse_utc("2026-10-11T03:00:00Z").unwrap();
+        let status: StatusResponse = serde_json::from_str(
+            r#"{"data":{"active_watch":null,"scheduled_reset":{"id":"2109045392684032299","status":"scheduled","reset_type":"regular","announced_at":"2026-10-10T22:16:20.000Z","scheduled_for":"2026-10-11T07:00:00.000Z","source":{"type":"x_post","author":"thsottiaux","url":"https://x.com/thsottiaux/status/2109045392684032299"}}},"meta":{"generated_at":"2026-10-11T02:56:46.506Z"}}"#,
+        )
+        .unwrap();
+        let result = super::normalize_at(status, ResetListResponse::default(), now);
+        let signal = result.active_watch.unwrap();
+
+        assert_eq!(signal.signal_kind, "scheduled");
+        assert_eq!(signal.level, "strong");
+        assert_eq!(signal.reset_chance_percent, None);
+        assert_eq!(signal.observed_at, "2026-10-10T22:16:20.000Z");
+        assert_eq!(signal.expires_at, "2026-10-11T07:00:00.000Z");
+        assert_eq!(result.tomorrow_risk_percent, 10.0);
+        assert!(result
+            .risk_factors
+            .iter()
+            .all(|factor| factor.id != "tracker-watch"));
+    }
+
+    #[test]
+    fn rejects_expired_malformed_untrusted_and_unknown_schedules() {
+        let now = super::parse_utc("2026-10-11T03:00:00Z").unwrap();
+        let valid = || super::ScheduledReset {
+            id: "2109045392684032299".into(),
+            status: "scheduled".into(),
+            reset_type: "regular".into(),
+            announced_at: "2026-10-10T22:16:20Z".into(),
+            scheduled_for: "2026-10-11T07:00:00Z".into(),
+            source: super::AnnouncementSource {
+                source_type: "x_post".into(),
+                author: "thsottiaux".into(),
+                url: "https://x.com/thsottiaux/status/2109045392684032299".into(),
+            },
+        };
+        let mut candidates = Vec::new();
+        let mut expired = valid();
+        expired.scheduled_for = "2026-10-11T03:00:00Z".into();
+        candidates.push(expired);
+        let mut unknown = valid();
+        unknown.status = "unknown".into();
+        candidates.push(unknown);
+        let mut malformed = valid();
+        malformed.scheduled_for = "bad".into();
+        candidates.push(malformed);
+        let mut untrusted_author = valid();
+        untrusted_author.source.author = "someone-else".into();
+        candidates.push(untrusted_author);
+        let mut untrusted_url = valid();
+        untrusted_url.source.url = "https://example.com/2109045392684032299".into();
+        candidates.push(untrusted_url);
+        let mut mismatched_id = valid();
+        mismatched_id.source.url = "https://x.com/thsottiaux/status/999".into();
+        candidates.push(mismatched_id);
+        let mut too_far = valid();
+        too_far.scheduled_for = "2026-10-14T23:00:00Z".into();
+        candidates.push(too_far);
+
+        for candidate in candidates {
+            assert!(super::scheduled_signal(Some(&candidate), now).is_none());
+        }
+        assert!(super::scheduled_signal(None, now).is_none());
     }
 
     #[test]

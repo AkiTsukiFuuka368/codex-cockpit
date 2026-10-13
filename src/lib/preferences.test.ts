@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_WIDGET_PREFERENCES, effectiveCompactLayout, effectiveStayExpanded, normalizeWidgetPreferences, syncDailyBudgetToSuggestion } from "./preferences";
+import { DEFAULT_WIDGET_PREFERENCES, defaultFontScaleForPlatform, effectiveCompactLayout, effectiveStayExpanded, normalizeWidgetPreferences, syncDailyBudgetToSuggestion } from "./preferences";
+import { UI_FONT_OPTIONS, defaultFontFamilyForPlatform } from "./fonts";
 
 describe("widget preference migration", () => {
+  it("keeps platform defaults for older settings and persists every supported font", () => {
+    expect(defaultFontFamilyForPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("system");
+    expect(defaultFontFamilyForPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("smiley");
+    expect(normalizeWidgetPreferences({}).fontFamily).toBe(DEFAULT_WIDGET_PREFERENCES.fontFamily);
+    for (const { id } of UI_FONT_OPTIONS) {
+      const restored = JSON.parse(JSON.stringify(normalizeWidgetPreferences({ fontFamily: id, fontScale: 1.75 })));
+      expect(normalizeWidgetPreferences(restored)).toEqual(expect.objectContaining({ fontFamily: id, fontScale: 1.75 }));
+    }
+    for (const value of [null, 12, {}, "unknown", "serif; background: url(x)"]) {
+      expect(normalizeWidgetPreferences({ fontFamily: value as never }).fontFamily).toBe(DEFAULT_WIDGET_PREFERENCES.fontFamily);
+    }
+  });
+
+  it("uses a readable 150% default on both desktop platforms without replacing manual sizes", () => {
+    expect(defaultFontScaleForPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(1.5);
+    expect(defaultFontScaleForPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe(1.5);
+    expect(normalizeWidgetPreferences({}).fontScale).toBe(1.5);
+    expect(normalizeWidgetPreferences({ fontScale: 1.1 }).fontScale).toBe(1.1);
+    expect(normalizeWidgetPreferences({ fontScale: 2 }).fontScale).toBe(2);
+  });
+
   it("preserves only valid personal ring colors", () => {
     expect(normalizeWidgetPreferences({ personRingColors: { alex: "#123456", bad: "red;url(x)" } }).personRingColors).toEqual({ alex: "#123456" });
     expect(normalizeWidgetPreferences({}).personRingColors).toEqual({});
@@ -23,7 +45,8 @@ describe("widget preference migration", () => {
     expect(value.expandedLayout).toBe("dashboard");
     expect(value.colorTheme).toBe("aurora");
     expect(value.appearanceMode).toBe("light");
-    expect(value.fontScale).toBe(1.15);
+    expect(value.fontScale).toBe(DEFAULT_WIDGET_PREFERENCES.fontScale);
+    expect(value.backgroundBlur).toBe(true);
     expect(value.codexFocusMode).toBe(true);
     expect(value.dailyBudgetPercent).toBe(14.3);
     expect(value.dailyBudgetLocalDate).toBeNull();
@@ -31,6 +54,11 @@ describe("widget preference migration", () => {
     expect(value.riskFirst).toBe(false);
     expect(value.showHistorySparklines).toBe(true);
     expect(value.notificationsEnabled).toBe(true);
+  });
+
+  it("preserves an explicit no-blur background preference", () => {
+    expect(normalizeWidgetPreferences({ backgroundBlur: false }).backgroundBlur).toBe(false);
+    expect(normalizeWidgetPreferences({ backgroundBlur: "false" as never }).backgroundBlur).toBe(true);
   });
 
   it("normalizes independent compact layouts and color themes", () => {

@@ -56,8 +56,12 @@ struct Auth {
 }
 
 fn codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
+    crate::local_usage::selected_root()
+        .or_else(|| {
+            std::env::var_os("CODEX_HOME")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
@@ -545,7 +549,14 @@ fn find_window<'a>(
                 .values()
                 .filter(|value| parse_window(Some(value)).is_some());
             let only = parseable.next();
-            if only.is_some() && parseable.next().is_none() {
+            // Only an undated legacy weekly bucket may fall back by cardinality.
+            // A sole weekly bucket is NOT a 5h window (and vice versa).
+            if expected_seconds == 604_800
+                && only.is_some_and(|value| {
+                    parse_window(Some(value)).is_some_and(|window| window.window_seconds == 0)
+                })
+                && parseable.next().is_none()
+            {
                 return only;
             }
         }
@@ -887,8 +898,7 @@ async fn fetch_legacy_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
         .get("rate_limit")
         .or_else(|| usage.get("rateLimit"))
         .unwrap_or(&usage);
-    // Keep collecting the legacy five-hour window for compatibility and diagnostics.
-    // The UI deliberately ignores this field and presents weekly quota only.
+    // Display a five-hour window only when the provider actually supplies it.
     let short_window = parse_window(find_window(
         rate_limit,
         &[
@@ -1125,6 +1135,17 @@ mod tests {
         });
         assert!(find_window(&value, &["primary_window", "primary"], 18_000).is_none());
         assert!(find_window(&value, &["weekly_window", "weekly"], 604_800).is_some());
+    }
+
+    #[test]
+    fn does_not_invent_a_missing_window_from_a_single_known_duration() {
+        for (seconds, wrong_seconds) in [(604_800, 18_000), (18_000, 604_800)] {
+            let value = serde_json::json!({
+                "primary_window": {"used_percent": 26, "limit_window_seconds": seconds}
+            });
+            assert!(find_window(&value, &["primary_window"], wrong_seconds).is_none());
+            assert!(find_window(&value, &["primary_window"], seconds).is_some());
+        }
     }
 
     #[test]

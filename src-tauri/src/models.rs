@@ -109,8 +109,12 @@ pub struct WidgetPreferences {
     pub visual_style: Option<String>,
     #[serde(default = "default_appearance_mode")]
     pub appearance_mode: String,
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
     #[serde(default = "default_font_scale")]
     pub font_scale: f64,
+    #[serde(default = "default_true")]
+    pub background_blur: bool,
     #[serde(default)]
     pub person_ring_colors: std::collections::BTreeMap<String, String>,
     #[serde(default)]
@@ -174,7 +178,14 @@ fn default_appearance_mode() -> String {
     "light".into()
 }
 fn default_font_scale() -> f64 {
-    1.15
+    1.5
+}
+fn default_font_family() -> String {
+    if cfg!(target_os = "windows") {
+        "system".into()
+    } else {
+        "smiley".into()
+    }
 }
 fn default_accent_color() -> String {
     "#397ae0".into()
@@ -231,7 +242,9 @@ impl Default for WidgetPreferences {
             color_theme: default_color_theme(),
             visual_style: None,
             appearance_mode: default_appearance_mode(),
+            font_family: default_font_family(),
             font_scale: default_font_scale(),
+            background_blur: true,
             person_ring_colors: Default::default(),
             risk_first: false,
             show_history_sparklines: true,
@@ -340,7 +353,13 @@ impl WidgetPreferences {
         if !self.font_scale.is_finite() {
             self.font_scale = default_font_scale();
         }
-        self.font_scale = (self.font_scale.clamp(0.85, 1.5) * 20.0).round() / 20.0;
+        self.font_scale = (self.font_scale.clamp(1.0, 2.0) * 20.0).round() / 20.0;
+        if !matches!(
+            self.font_family.as_str(),
+            "system" | "codex" | "yahei" | "smiley" | "wenkai" | "times" | "fz-song"
+        ) {
+            self.font_family = default_font_family();
+        }
         if !is_safe_hex_color(&self.accent_color) {
             self.accent_color = default_accent_color();
         }
@@ -477,7 +496,79 @@ mod tests {
             Some("2026-08-16")
         );
         assert_eq!(normalized.reset_risk_override_percent, Some(100.0));
-        assert_eq!(normalized.font_scale, 1.5);
+        assert_eq!(normalized.font_scale, 2.0);
+    }
+
+    #[test]
+    fn font_scale_defaults_to_readable_size_and_preserves_manual_sizes() {
+        assert_eq!(WidgetPreferences::default().font_scale, 1.5);
+        let legacy: WidgetPreferences = serde_json::from_str(
+            r#"{"locked":false,"pinnedProvider":null,"autoRotateSeconds":12}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.normalized().font_scale, 1.5);
+        for scale in [1.1, 1.25, 1.5, 2.0] {
+            let preferences = WidgetPreferences {
+                font_scale: scale,
+                ..Default::default()
+            };
+            let serialized = serde_json::to_string(&preferences.normalized()).unwrap();
+            let restored: WidgetPreferences = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(restored.normalized().font_scale, scale);
+        }
+    }
+
+    #[test]
+    fn font_family_migrates_and_roundtrips_every_allowlisted_choice() {
+        let legacy: WidgetPreferences = serde_json::from_str(
+            r#"{"locked":false,"pinnedProvider":null,"autoRotateSeconds":12}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.normalized().font_family,
+            super::default_font_family()
+        );
+        for family in [
+            "system", "codex", "yahei", "smiley", "wenkai", "times", "fz-song",
+        ] {
+            let preferences = WidgetPreferences {
+                font_family: family.into(),
+                font_scale: 1.75,
+                ..Default::default()
+            };
+            let serialized = serde_json::to_string(&preferences.normalized()).unwrap();
+            let restored: WidgetPreferences = serde_json::from_str(&serialized).unwrap();
+            let normalized = restored.normalized();
+            assert_eq!(normalized.font_family, family);
+            assert_eq!(normalized.font_scale, 1.75);
+        }
+        for family in ["unknown", "serif; background: url(x)", ""] {
+            let preferences = WidgetPreferences {
+                font_family: family.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                preferences.normalized().font_family,
+                super::default_font_family()
+            );
+        }
+    }
+
+    #[test]
+    fn background_blur_defaults_on_and_roundtrips_an_explicit_opt_out() {
+        let legacy: WidgetPreferences = serde_json::from_str(
+            r#"{"locked":false,"pinnedProvider":null,"autoRotateSeconds":12}"#,
+        )
+        .expect("legacy preferences should remain readable");
+        assert!(legacy.background_blur);
+
+        let preferences = WidgetPreferences {
+            background_blur: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&preferences).unwrap();
+        let restored: WidgetPreferences = serde_json::from_str(&json).unwrap();
+        assert!(!restored.background_blur);
     }
 
     #[test]
