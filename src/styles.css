@@ -1695,9 +1695,9 @@ button.usage-stat-card:hover { border-color: color-mix(in srgb, var(--accent-col
 .usage-share { display: block; color: var(--glass-muted); font-size: .72em; font-weight: 400; margin-top: 3px; }
 .usage-total > .usage-text-button { justify-self: start; }
 .usage-donut svg { display: block; width: 100%; }
-.usage-donut > div { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
-.usage-donut strong { font-size: calc(17px * var(--ui-font-scale, 1)); }
-.usage-donut small { color: var(--glass-muted); font-size: 11px; margin-top: 5px; }
+.usage-donut-readout { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: max-content; display: flex; flex-direction: column; align-items: center; justify-content: center; white-space: nowrap; pointer-events: none; }
+.usage-donut strong { font-size: calc(17px * var(--ui-font-scale, 1) * var(--ring-readout-fit, 1)); line-height: 1.2; font-variant-numeric: tabular-nums; }
+.usage-donut small { color: var(--glass-muted); font-size: calc(11px * var(--ring-readout-fit, 1)); line-height: 1.3; margin-top: calc(5px * var(--ring-readout-fit, 1)); }
 .codex-usage-panel:has(.usage-donut) .usage-total { padding: 14px 3px 0; }
 .codex-usage-panel:has(.usage-donut) .usage-total { display: flex; align-items: baseline; gap: 8px; flex-wrap: nowrap; white-space: nowrap; }
 .codex-usage-panel:has(.usage-donut) .usage-total > strong, .codex-usage-panel:has(.usage-donut) .usage-total > span { display: none; }

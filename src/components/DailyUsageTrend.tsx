@@ -305,6 +305,7 @@ export function DailyUsageTrend({ devices, metric, zh, now = new Date(), anchorD
         {!latestWindow && <button type="button" className="daily-trend-latest" onClick={() => { setWindowAnchor(today); setActivePoint(null); }}>{zh ? "今天" : "Today"}</button>}
       </div>
     </div>
+    {peak !== null && <p className="daily-trend-peak">{zh ? "峰" : "max"} {format(peak)}</p>}
     <div
       className="daily-trend-viewport"
       aria-label={zh ? "拖动或横向滚动浏览历史" : "Drag or scroll horizontally through history"}
@@ -333,7 +334,6 @@ export function DailyUsageTrend({ devices, metric, zh, now = new Date(), anchorD
       {peak !== null ? <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={zh ? `${title}曲线图` : `${title} chart`} onMouseLeave={() => setActivePoint(null)}>
         <line x1={left} y1={top} x2={left} y2={top + innerHeight} className="daily-trend-grid" />
         {[0, .5, 1].map((fraction) => <line key={fraction} x1={left} y1={top + innerHeight * fraction} x2={width - right} y2={top + innerHeight * fraction} className="daily-trend-grid" />)}
-        <text className="daily-trend-axis-value" x={left - 10} y={top + 5} textAnchor="end">{zh ? "峰" : "max"} {format(peak)}</text>
         <text className="daily-trend-axis-value" x={left - 10} y={top + innerHeight + 5} textAnchor="end">0</text>
         <path d={segments.join(" ")} className="daily-trend-line" />
         <path d={missingBridges.join(" ")} className="daily-trend-line daily-trend-line--missing" />

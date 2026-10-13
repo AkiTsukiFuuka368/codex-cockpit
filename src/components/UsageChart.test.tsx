@@ -5,8 +5,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { aggregateGroupUsage, createUsagePreview } from "../lib/tokeiUsage";
 import { UsageChart, usageColor, usageRankColor } from "./UsageChart";
 
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 describe("usage charts", () => {
+  it.each([1, 1.5, 2])("fits the full long task readout inside the hole at font scale %s", (fontScale) => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const fit = Number(this.style.getPropertyValue("--ring-readout-fit")) || 1;
+      return {
+        width: this.classList.contains("usage-donut-readout") ? 140 * fontScale * fit : 170,
+        height: (24 * fontScale + 19) * fit,
+      } as DOMRect;
+    });
+    const { container, rerender } = render(<UsageChart rows={[]} total={33071100} devices={[]} period="today" ids={[]} zh tasks />);
+    expect(screen.getByText("3307.11万")).toBeInTheDocument();
+    expect(screen.getByText("任务用量 · Tokens")).toBeInTheDocument();
+    const readout = container.querySelector(".usage-donut-readout") as HTMLElement;
+    const fit = Number(readout.style.getPropertyValue("--ring-readout-fit"));
+    expect(fit).toBeGreaterThan(0);
+    expect(fit).toBeLessThan(1);
+    const bounds = readout.getBoundingClientRect();
+    expect(Math.hypot(bounds.width, bounds.height)).toBeLessThan(170 * 115 / 160);
+    rerender(<UsageChart rows={[]} total={null} devices={[]} period="today" ids={[]} zh tasks metric="cost" onToggle={() => {}} />);
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("任务用量 · 已知成本")).toBeInTheDocument();
+  });
   it("samples the entire warm-to-cool palette evenly for the current task count", () => {
     expect(usageRankColor(0, 5)).toBe("#e76254");
     expect(usageRankColor(2, 5)).toBe("#d5e1cc");

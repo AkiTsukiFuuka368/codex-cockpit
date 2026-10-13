@@ -129,6 +129,18 @@
   user-select: none;
 }
 
+/* Keep long amounts in normal flow; an end-anchored SVG label can extend
+   outside the card, especially with wider Windows fonts. */
+.daily-trend-peak {
+  margin: 8px 0 0;
+  color: var(--glass-ink, #eef4f6);
+  font-size: calc(10px * var(--ui-font-scale, 1));
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .daily-trend-viewport:active {
   cursor: grabbing;
 }
