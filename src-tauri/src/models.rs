@@ -406,10 +406,10 @@ mod tests {
         )
         .expect("legacy preferences should remain readable");
 
-        assert_eq!(preferences.font_family, "smiley");
+        assert_eq!(preferences.font_family, super::default_font_family());
         assert_eq!(preferences.font_scale, 1.3);
         let normalized = preferences.normalized();
-        assert_eq!(normalized.font_family, "smiley");
+        assert_eq!(normalized.font_family, super::default_font_family());
         assert_eq!(normalized.font_scale, 1.3);
     }
 
@@ -433,13 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_font_family_falls_back_to_smiley() {
+    fn unknown_font_family_falls_back_to_platform_default() {
         for font_family in ["", "unknown", "Codex", "url(remote-font)"] {
             let preferences = WidgetPreferences {
                 font_family: font_family.into(),
                 ..Default::default()
             };
-            assert_eq!(preferences.normalized().font_family, "smiley");
+            assert_eq!(
+                preferences.normalized().font_family,
+                super::default_font_family()
+            );
         }
     }
 

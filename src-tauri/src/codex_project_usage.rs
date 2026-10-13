@@ -1850,6 +1850,454 @@ pub async fn get_codex_project_usage_from_source(
 mod tests {
     use super::*;
     #[test]
+    fn standalone_sessions_collect_tokens_without_tokei_or_sync() {
+        let home = metadata_fixture_dir("standalone");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        fs::create_dir_all(codex.join("archived_sessions")).unwrap();
+        fs::write(
+            codex.join("sessions/synthetic.jsonl"),
+            format!("{CONTEXT}\n{FIRST}\n{SECOND}\n"),
+        )
+        .unwrap();
+        let snapshot = collect_increment(&home, &codex, &mut Index::default());
+        assert_eq!(snapshot.scanned_files, 1);
+        assert_eq!(snapshot.device_id, None);
+        assert!(snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning == "device_identity_unavailable"));
+        assert_eq!(
+            snapshot
+                .projects
+                .iter()
+                .flat_map(|project| project.daily.values())
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>(),
+            170
+        );
+        assert!(!home.join(".tokei").exists());
+        assert!(!home.join("cloud-sync.json").exists());
+        assert!(!home.join("usage-sync-local.json").exists());
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("SECRET"));
+        fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn missing_source_empty_source_and_observed_zero_are_distinct() {
+        let dir = metadata_fixture_dir("empty-source");
+        let missing = collect_increment(&dir, &dir.join("absent"), &mut Index::default());
+        assert!(missing
+            .warnings
+            .iter()
+            .any(|w| w == "codex_directory_missing"));
+        assert_eq!(missing.status, "unavailable");
+        let empty = collect_increment(&dir, &dir, &mut Index::default());
+        assert!(empty.warnings.iter().any(|w| w == "no_usage_records"));
+        assert!(!empty
+            .warnings
+            .iter()
+            .any(|w| w == "source_permission_denied"));
+        let zero = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}"#;
+        let observed = run(&[CONTEXT, zero]);
+        let day = observed
+            .projects
+            .values()
+            .next()
+            .unwrap()
+            .daily
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(day.metrics.total_tokens, 0);
+        assert_eq!(day.metrics.estimated_cost_usd, Some(0.0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn switching_source_never_reuses_the_previous_directory_index() {
+        let dir = metadata_fixture_dir("switch-source");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::create_dir_all(a.join("sessions")).unwrap();
+        fs::create_dir_all(b.join("sessions")).unwrap();
+        fs::write(a.join("sessions/a.jsonl"), format!("{CONTEXT}\n{FIRST}\n")).unwrap();
+        fs::write(
+            b.join("sessions/b.jsonl"),
+            format!(
+                "{CONTEXT}\n{}\n",
+                FIRST.replace("\"input_tokens\":100", "\"input_tokens\":200")
+            ),
+        )
+        .unwrap();
+        let mut index = Index::default();
+        let before = collect_increment(&dir, &a, &mut index);
+        let after = collect_increment(&dir, &b, &mut index);
+        assert_ne!(
+            TaskMetadataKey::from_codex(&a),
+            TaskMetadataKey::from_codex(&b)
+        );
+        assert_eq!(
+            before.projects[0]
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            110
+        );
+        assert_eq!(
+            after.projects[0]
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            210
+        );
+        assert_eq!(after.scanned_files, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn short_metadata_rejects_fifo_before_opening() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = metadata_fixture_dir("metadata-fifo");
+        let path = dir.join(".git");
+        let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert_eq!(short_file(&path), None);
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "gitdir: example").unwrap();
+        assert_eq!(short_file(&path).as_deref(), Some("gitdir: example"));
+        fs::write(&path, "x".repeat(4097)).unwrap();
+        assert_eq!(short_file(&path), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    fn run(lines: &[&str]) -> Collector {
+        run_with_pricing(lines, Pricing::default())
+    }
+    fn run_with_pricing(lines: &[&str], pricing: Pricing) -> Collector {
+        let mut c = Collector {
+            pricing,
+            ..Collector::default()
+        };
+        c.scan(
+            std::io::Cursor::new(format!("{}\n", lines.join("\n"))),
+            Path::new("/home/test"),
+            Path::new("/home/test/.codex"),
+            Instant::now(),
+        );
+        c
+    }
+    const CONTEXT: &str = r#"{"type":"turn_context","payload":{"model":"model-test","cwd":"/synthetic/repo","message":"SECRET"}}"#;
+    const FIRST: &str = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":9999,"output_tokens":0}},"message":"SECRET"}}"#;
+    const SECOND: &str = r#"{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"output_tokens":20,"reasoning_output_tokens":8}}}}"#;
+    const THIRD: &str = r#"{"timestamp":"2026-01-01T02:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":110,"output_tokens":30,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":30,"cached_input_tokens":10,"output_tokens":10,"reasoning_output_tokens":2}}}}"#;
+    fn metadata(rows: &[(&str, &str)]) -> ThreadMetadataCatalog {
+        ThreadMetadataCatalog {
+            entries: rows
+                .iter()
+                .map(|(id, title)| {
+                    (
+                        (*id).to_owned(),
+                        ThreadDisplayMetadata {
+                            title: Some((*title).to_owned()),
+                            ..ThreadDisplayMetadata::default()
+                        },
+                    )
+                })
+                .collect(),
+            database_loaded: true,
+            ..ThreadMetadataCatalog::default()
+        }
+    }
+    fn task_tokens(task: &TaskUsage) -> u64 {
+        task.daily
+            .values()
+            .map(|day| day.metrics.total_tokens)
+            .sum()
+    }
+    #[test]
+    fn cumulative_deltas_repeated_last_and_privacy() {
+        let c = run(&[CONTEXT, FIRST, FIRST, SECOND]);
+        let p = c.projects.values().next().unwrap();
+        let m = &p.daily.values().next().unwrap().metrics;
+        assert_eq!(m.total_tokens, 170);
+        assert_eq!(m.input_tokens, 50);
+        assert_eq!(m.cached_input_tokens, 100);
+        assert_eq!(m.reasoning_tokens, 8);
+        assert!(m.estimated_cost_usd.is_none());
+        assert!(!serde_json::to_string(p).unwrap().contains("SECRET"));
+    }
+    #[test]
+    fn source_model_ids_remain_distinct_across_turns() {
+        let sol =
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","cwd":"/synthetic/repo"}}"#;
+        let luna =
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna","cwd":"/synthetic/repo"}}"#;
+        let astra =
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","cwd":"/synthetic/repo"}}"#;
+        let new_sol =
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-sol","cwd":"/synthetic/repo"}}"#;
+        let new_luna =
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-luna","cwd":"/synthetic/repo"}}"#;
+        let first = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":0},"last_token_usage":{"input_tokens":30,"output_tokens":0}}}}"#;
+        let second = r#"{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60,"output_tokens":0},"last_token_usage":{"input_tokens":30,"output_tokens":0}}}}"#;
+        let third = r#"{"timestamp":"2026-01-01T02:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":0},"last_token_usage":{"input_tokens":40,"output_tokens":0}}}}"#;
+        let fourth = r#"{"timestamp":"2026-01-01T03:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":0},"last_token_usage":{"input_tokens":30,"output_tokens":0}}}}"#;
+        let fifth = r#"{"timestamp":"2026-01-01T04:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"output_tokens":0},"last_token_usage":{"input_tokens":30,"output_tokens":0}}}}"#;
+        let collector = run(&[
+            sol, first, luna, second, astra, third, new_sol, fourth, new_luna, fifth,
+        ]);
+        let day = collector
+            .projects
+            .values()
+            .next()
+            .unwrap()
+            .daily
+            .values()
+            .next()
+            .unwrap();
+        let models: BTreeMap<_, _> = day
+            .models
+            .iter()
+            .map(|model| (model.id.as_str(), model.metrics.total_tokens))
+            .collect();
+        assert_eq!(
+            models,
+            BTreeMap::from([
+                ("gpt-5.6-luna", 30),
+                ("gpt-5.6-sol", 30),
+                ("gpt-6-astra", 40),
+                ("gpt-6-sol", 30),
+                ("gpt-6-luna", 30),
+            ])
+        );
+    }
+    #[test]
+    fn exact_model_identity_and_cost_survive_collector_snapshot_roundtrip() {
+        let rate = |input| Rate {
+            input: Some(input),
+            output: Some(0.0),
+            cache_read: Some(0.0),
+            canonical_slug: None,
+        };
+        let pricing = Pricing {
+            models: BTreeMap::from([
+                ("gpt-5.6-sol".into(), rate(10.0)),
+                ("gpt-5.6-luna".into(), rate(20.0)),
+                ("gpt-6-astra".into(), rate(30.0)),
+            ]),
+            ..Pricing::default()
+        };
+        let sol = r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","cwd":"/synthetic/repo","message":"DO_NOT_COPY"}}"#;
+        let luna = r#"{"type":"turn_context","payload":{"model":"gpt-5.6-luna","cwd":"/synthetic/repo","message":"DO_NOT_COPY"}}"#;
+        let astra = r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","cwd":"/synthetic/repo","message":"DO_NOT_COPY"}}"#;
+        let first = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"output_tokens":0},"last_token_usage":{"input_tokens":100000,"output_tokens":0}}},"message":"DO_NOT_COPY"}"#;
+        let second = r#"{"timestamp":"2026-09-22T00:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"output_tokens":0},"last_token_usage":{"input_tokens":200000,"output_tokens":0}}},"message":"DO_NOT_COPY"}"#;
+        let third = r#"{"timestamp":"2026-09-22T00:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":550000,"output_tokens":0},"last_token_usage":{"input_tokens":250000,"output_tokens":0}}},"message":"DO_NOT_COPY"}"#;
+        let collector = run_with_pricing(&[sol, first, luna, second, astra, third], pricing);
+        let collected = ProjectUsageSnapshot {
+            device_id: Some("device".into()),
+            updated_at: "2026-09-22T00:03:00Z".into(),
+            status: "ready".into(),
+            coverage: "local".into(),
+            scanned_files: 1,
+            pricing_source: "test-catalog".into(),
+            pricing_updated_at: None,
+            task_metadata_coverage: "complete".into(),
+            projects: collector.projects.values().cloned().collect(),
+            tasks: Vec::new(),
+            peer_tasks: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let wire = crate::usage_sync_snapshot::build_at(
+            "device",
+            &collected,
+            &[],
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 22).unwrap(),
+        )
+        .unwrap();
+        assert!(!wire.to_string().contains("DO_NOT_COPY"));
+        let parsed = crate::tokei_usage::parse_device(&wire, "device", None).unwrap();
+        let day = &parsed.daily["2026-09-22"];
+        let models: BTreeMap<_, _> = day
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.as_str(),
+                    (
+                        model.metrics.total_tokens,
+                        model.metrics.estimated_cost_usd.unwrap(),
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(models["gpt-5.6-sol"].0, 100_000);
+        assert!((models["gpt-5.6-sol"].1 - 1.0).abs() < 1e-10);
+        assert_eq!(models["gpt-5.6-luna"].0, 200_000);
+        assert!((models["gpt-5.6-luna"].1 - 4.0).abs() < 1e-10);
+        assert_eq!(models["gpt-6-astra"].0, 250_000);
+        assert!((models["gpt-6-astra"].1 - 7.5).abs() < 1e-10);
+        assert_eq!(day.metrics.total_tokens, 550_000);
+        assert!((day.metrics.estimated_cost_usd.unwrap() - 12.5).abs() < 1e-10);
+    }
+    #[test]
+    fn fork_replay_is_not_counted_twice() {
+        let mut c = run(&[CONTEXT, FIRST, SECOND]);
+        c.scan(
+            std::io::Cursor::new(format!("{CONTEXT}\n{FIRST}\n{SECOND}\n")),
+            Path::new("/home/test"),
+            Path::new("/home/test/.codex"),
+            Instant::now(),
+        );
+        assert_eq!(
+            c.projects
+                .values()
+                .next()
+                .unwrap()
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            170
+        );
+    }
+    #[test]
+    fn independent_sessions_do_not_collide_but_fork_lineage_deduplicates() {
+        let parent = r#"{"type":"session_meta","payload":{"id":"parent","cwd":"/synthetic/repo"}}"#;
+        let other =
+            r#"{"type":"session_meta","payload":{"id":"independent","cwd":"/synthetic/repo"}}"#;
+        let fork = r#"{"type":"session_meta","payload":{"id":"child","forked_from_id":"parent","cwd":"/synthetic/repo"}}"#;
+        let mut c = run(&[parent, CONTEXT, FIRST, SECOND]);
+        let h = Path::new("/home/test");
+        let codex = h.join(".codex");
+        c.scan(
+            std::io::Cursor::new(format!("{other}\n{CONTEXT}\n{FIRST}\n{SECOND}\n")),
+            h,
+            &codex,
+            Instant::now(),
+        );
+        assert_eq!(
+            c.projects
+                .values()
+                .next()
+                .unwrap()
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            340
+        );
+        c.scan(
+            std::io::Cursor::new(format!("{fork}\n{CONTEXT}\n{FIRST}\n{SECOND}\n")),
+            h,
+            &codex,
+            Instant::now(),
+        );
+        assert_eq!(
+            c.projects
+                .values()
+                .next()
+                .unwrap()
+                .daily
+                .values()
+                .next()
+                .unwrap()
+                .metrics
+                .total_tokens,
+            340
+        );
+    }
+    #[test]
+    fn spawned_child_has_own_usage_and_folds_to_root() {
+        let parent = r#"{"type":"session_meta","payload":{"id":"parent","cwd":"/synthetic/repo"}}"#;
+        let child = r#"{"type":"session_meta","payload":{"id":"child","parent_thread_id":"parent","cwd":"/synthetic/repo"}}"#;
+        let mut c = run(&[parent, CONTEXT, FIRST, SECOND]);
+        let h = Path::new("/home/test");
+        c.scan(
+            std::io::Cursor::new(format!("{child}\n{CONTEXT}\n{FIRST}\n{SECOND}\n")),
+            h,
+            &h.join(".codex"),
+            Instant::now(),
+        );
+        let tasks = c.rendered_tasks(&metadata(&[("parent", "Parent"), ("child", "Child")]));
+        let parent = tasks.iter().find(|task| task.id == "parent").unwrap();
+        let child = tasks.iter().find(|task| task.id == "child").unwrap();
+        assert_eq!(task_tokens(parent), 170);
+        assert_eq!(task_tokens(child), 170);
+        assert_eq!(child.relation, TaskRelation::Subagent);
+        assert_eq!(child.parent_id.as_deref(), Some("parent"));
+        assert_eq!(child.root_id.as_deref(), Some("parent"));
+        assert_eq!(
+            c.projects
+                .values()
+                .flat_map(|project| project.daily.values())
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>(),
+            340
+        );
+    }
+    #[test]
+    fn ordinary_fork_deduplicates_replay_but_keeps_standalone_work() {
+        let parent = r#"{"type":"session_meta","payload":{"id":"parent","cwd":"/synthetic/repo"}}"#;
+        let fork = r#"{"type":"session_meta","payload":{"id":"fork","forked_from_id":"parent","cwd":"/synthetic/repo"}}"#;
+        let mut c = run(&[parent, CONTEXT, FIRST, SECOND]);
+        let h = Path::new("/home/test");
+        c.scan(
+            std::io::Cursor::new(format!("{fork}\n{CONTEXT}\n{FIRST}\n{SECOND}\n{THIRD}\n")),
+            h,
+            &h.join(".codex"),
+            Instant::now(),
+        );
+        let tasks = c.rendered_tasks(&metadata(&[("parent", "Parent"), ("fork", "Fork")]));
+        let fork = tasks.iter().find(|task| task.id == "fork").unwrap();
+        assert_eq!(task_tokens(fork), 40);
+        assert_eq!(fork.relation, TaskRelation::Fork);
+        assert_eq!(fork.parent_id.as_deref(), Some("parent"));
+        assert_eq!(fork.root_id.as_deref(), Some("fork"));
+        assert_eq!(
+            c.projects
+                .values()
+                .flat_map(|project| project.daily.values())
+                .map(|day| day.metrics.total_tokens)
+                .sum::<u64>(),
+            210
+        );
+    }
+    fn collect_replay_fixture(parent_name: &str, fork_name: &str) -> BTreeMap<String, u64> {
+        let home = metadata_fixture_dir("replay-order");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        fs::create_dir_all(codex.join("archived_sessions")).unwrap();
+        let parent = r#"{"type":"session_meta","payload":{"id":"parent","cwd":"/synthetic/repo"}}"#;
+        let fork = r#"{"type":"session_meta","payload":{"id":"fork","forked_from_id":"parent","cwd":"/synthetic/repo"}}"#;
+        fs::write(
+            codex.join("sessions").join(parent_name),
+            format!("{parent}\n{CONTEXT}\n{FIRST}\n{SECOND}\n"),
+        )
+        .unwrap();
+        fs::write(
+            codex.join("sessions").join(fork_name),
+            format!("{fork}\n{CONTEXT}\n{FIRST}\n{SECOND}\n{THIRD}\n"),
+        )
+        .unwrap();
+        let snapshot = collect_increment(&home, &codex, &mut Index::default());
+        let result = snapshot
+            .tasks
+            .iter()
+            .map(|task| (task.id.clone(), task_tokens(task)))
+            .collect();
+        fs::remove_dir_all(home).unwrap();
+        result
+    }
+    #[test]
     fn reversed_parent_and_fork_file_order_has_stable_self_attribution() {
         let parent_first = collect_replay_fixture("a-parent.jsonl", "z-fork.jsonl");
         let fork_first = collect_replay_fixture("z-parent.jsonl", "a-fork.jsonl");
