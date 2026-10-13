@@ -61,6 +61,7 @@ describe("personal Codex usage", () => {
     expect(merged.devices[1]).toBe(data.devices[1]);
     expect(data.devices[0].daily["2026-09-10"].estimatedCostUsd).toBe(oldDay.estimatedCostUsd);
     expect(withLiveLocalUsage(data, { ...projects, updatedAt: "2026-09-10T01:00:00Z" })).toBe(data);
+    expect(withLiveLocalUsage(data, { ...projects, warnings: ["scan_limit"] })).toBe(data);
   });
   it("uses Chinese count units only in Chinese", () => {
     expect([999, 1200, 10000, 206710000, 1e9].map(value => formatTokens(value, true))).toEqual(["999", "1.2千", "1万", "2.07亿", "10亿"]);
@@ -86,6 +87,8 @@ describe("personal Codex usage", () => {
     expect(canonicalModelId("other/gpt-6-astra")).toBe("other/gpt-6-astra");
     expect(canonicalModelId("tokei-name:GPT-6")).toBe("gpt-6");
     expect(canonicalModelId("openai/gpt-6-sol")).toBe("gpt-6-sol");
+    expect(canonicalModelId("tokei-name:openai/GPT-6.1-SOL")).toBe("gpt-6.1-sol");
+    expect(canonicalModelId("gpt-6.1-sol")).not.toBe(canonicalModelId("gpt-6-sol"));
     expect(canonicalModelId("tokei-name:openai/GPT-6-LUNA")).toBe("gpt-6-luna");
     expect(canonicalModelId("gpt-6-sol")).not.toBe(canonicalModelId("gpt-5.6-sol"));
   });

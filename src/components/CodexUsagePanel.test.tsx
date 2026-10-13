@@ -145,6 +145,15 @@ describe("quiet Codex usage view", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "用量分组" }), { target: { value: "group:other" } });
     expect(screen.getByRole("combobox", { name: "用量分组" })).toHaveValue("group:other");
   });
+  it("shows the previous aggregate immediately while a fresh read is still pending", () => {
+    const cached = createUsagePreview();
+    vi.mocked(getTokeiUsage).mockReturnValue(new Promise(() => undefined));
+    render(<CodexUsagePanel zh initialUsage={cached} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "查看方式" }), { target: { value: "models" } });
+    fireEvent.click(screen.getByRole("button", { name: "看成本" }));
+    const expected = aggregateGroupUsage(cached, cached.defaultGroupId, "today").estimatedCostUsd;
+    expect(screen.getByRole("img", { name: "模型用量占比" }).parentElement).toHaveTextContent(`$${expected?.toFixed(2)}`);
+  });
   it("shows the same fresh local cost by task and by model when sync is older", async () => {
     const data = createUsagePreview();
     data.devices[0].updatedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
@@ -473,8 +482,8 @@ describe("quiet Codex usage view", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: "查看方式" }), { target: { value: "models" } });
     expect(screen.getByText("Model A")).toBeInTheDocument();
-    expect(screen.queryByText("成员甲")).not.toBeInTheDocument();
-    expect(screen.queryByText("成员乙")).not.toBeInTheDocument();
+    expect(screen.queryByText("思思")).not.toBeInTheDocument();
+    expect(screen.queryByText("果冻")).not.toBeInTheDocument();
   });
   it("routes member management to the control center settings page", async () => {
     const onOpenSettings = vi.fn();

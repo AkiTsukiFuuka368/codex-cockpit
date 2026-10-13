@@ -3,13 +3,27 @@ import { readFileSync } from "node:fs";
 import { assertVersionSync, buildChangelog, nextVersion, updateCargoManifest } from "./release.mjs";
 
 describe("release automation", () => {
+  it("keeps the changelog in docs for both reading and release staging", () => {
+    const script = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
+    expect(script).toContain('resolve(ROOT, "docs", "CHANGELOG.md")');
+    expect(script).toContain('"docs/CHANGELOG.md"]');
+    expect(readFileSync(new URL("../docs/CHANGELOG.md", import.meta.url), "utf8")).toContain("# Changelog");
+  });
   it("does not save Rust caches during either platform's release job", () => {
     const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
     const build = workflow.split("  build:")[1].split("  publish:")[0];
     expect(build).toContain("os: macos-latest");
     expect(build).toContain("os: windows-latest");
-    expect(build).toMatch(/uses: swatinem\/rust-cache@v2\s+with:[\s\S]*?save-if: 'false'/);
+    expect(build).toMatch(/uses: swatinem\/rust-cache@[a-f0-9]{40} # v2\s+with:[\s\S]*?save-if: 'false'/);
     expect(build).not.toContain("continue-on-error");
+  });
+  it("pins every external release action to an immutable commit", () => {
+    for (const file of ["release.yml", "verify-release.yml"]) {
+      const workflow = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8");
+      const actions = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map(match => match[1]);
+      expect(actions.length).toBeGreaterThan(0);
+      for (const action of actions) expect(action).toMatch(/^[\w-]+\/[\w-]+@[a-f0-9]{40}$/);
+    }
   });
   it("bumps stable semantic versions", () => {
     expect(nextVersion("1.2.3", "patch")).toBe("1.2.4");
