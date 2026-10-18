@@ -3788,3 +3788,19 @@ textarea {
 .local-usage-actions button:disabled { opacity: .5; cursor: default; }
 .local-usage-actions button:focus-visible { outline: 2px solid var(--glass-accent, #7b9fff); outline-offset: 2px; }
 .local-usage-consent { padding: 10px; border: 1px solid var(--glass-edge); border-radius: 10px; }
+
+/* Claude usage page */
+.claude-usage-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.claude-daily { display: grid; gap: 6px; padding: 12px 3px 4px; }
+.claude-daily-title { color: var(--glass-muted, #9babbc); font-size: calc(9px * var(--ui-font-scale, 1)); }
+.claude-daily-bars { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); align-items: end; gap: 3px; height: 44px; }
+.claude-daily-bars i { display: block; border-radius: 3px 3px 1px 1px; background: var(--glass-mint, #7b9fff); opacity: .65; min-height: 0; }
+.claude-collector { margin-top: 10px; }
+.claude-collector .usage-note { margin: 4px 0 0; }
+.claude-collector-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.claude-wrapper-command { display: block; margin: 6px 0; padding: 8px; border-radius: 6px; background: rgba(123, 159, 255, .07); font-size: calc(8px * var(--ui-font-scale, 1)); word-break: break-all; user-select: text; }
+.claude-price-table { width: 100%; border-collapse: collapse; font-size: calc(8px * var(--ui-font-scale, 1)); font-variant-numeric: tabular-nums; }
+.claude-price-table th, .claude-price-table td { padding: 4px 3px; text-align: right; border-bottom: 1px solid rgba(123, 159, 255, .08); white-space: nowrap; }
+.claude-price-table th:first-child, .claude-price-table td:first-child { text-align: left; white-space: normal; }
+.claude-price-table th { color: var(--glass-muted, #9babbc); font-weight: 600; }
+.claude-price-table small { color: var(--glass-muted, #9babbc); }

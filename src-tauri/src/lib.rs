@@ -1,6 +1,7 @@
 mod antigravity;
 mod app_icon;
 mod app_updater;
+mod claude;
 mod cloud_sync;
 mod codex;
 mod codex_project_usage;
@@ -303,6 +304,7 @@ fn apply_short_window_test_override(
 
 async fn collect_snapshots_once(client: &reqwest::Client) -> Vec<ProviderSnapshot> {
     let qoder_snapshot = qoder::fetch_snapshot();
+    let claude_snapshot = claude::fetch_snapshot();
     let (
         codex_snapshot,
         trae_snapshot,
@@ -322,6 +324,7 @@ async fn collect_snapshots_once(client: &reqwest::Client) -> Vec<ProviderSnapsho
     values.extend(workbuddy_snapshot);
     values.extend(volcengine_snapshot);
     values.extend(antigravity_snapshot);
+    values.extend(claude_snapshot);
     values
 }
 
@@ -3188,7 +3191,9 @@ pub fn run() {
             import_app_data,
             create_automatic_backup,
             restore_latest_backup,
-            get_app_diagnostics
+            get_app_diagnostics,
+            claude::get_claude_usage,
+            claude::install_claude_collector
         ])
         .on_tray_icon_event(|app, event| {
             if let TrayIconEvent::Click {

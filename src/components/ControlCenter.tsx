@@ -12,6 +12,7 @@ import type { TokeiUsage } from "../lib/tokeiUsage";
 import { RangeSlider } from "./RangeSlider";
 import { ResetRiskQuotaHeatmap } from "./ResetRiskQuotaHeatmap";
 import { CodexUsagePanel } from "./CodexUsagePanel";
+import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
 import { TeamMemberSettings } from "./TeamMemberSettings";
 import { CloudSyncSettings } from "./CloudSyncSettings";
 import { LocalUsageSourceSettings } from "./LocalUsageSourceSettings";
@@ -51,7 +52,7 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
     comfortFeedback.filter(record => (record.personId ?? null) === comfortPersonId)
       .map(record => personalFeedbackView(record, comfortUsage, dailyUsageHistory, dailyUsage)),
   ), [comfortFeedback, comfortPersonId, comfortUsage, dailyUsageHistory, dailyUsage]);
-  const [page, setPage] = useState<"quota" | "usage" | "settings">("usage");
+  const [page, setPage] = useState<"quota" | "usage" | "claude" | "settings">("usage");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [calendarPortalTarget, setCalendarPortalTarget] = useState<HTMLElement | null>(null);
   const zh = language !== "en";
@@ -147,9 +148,10 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
         <nav className="usage-page-tabs" aria-label={zh ? "控制中心页面" : "Control center pages"}>
           <button type="button" aria-pressed={page === "usage"} onClick={() => changePage("usage")}>{zh ? "用量" : "Usage"}</button>
           <button type="button" aria-pressed={page === "quota"} onClick={() => changePage("quota")}>{zh ? "额度" : "Quota"}</button>
+          <button type="button" aria-pressed={page === "claude"} onClick={() => changePage("claude")}>Claude</button>
           <button type="button" aria-pressed={page === "settings"} onClick={() => changePage("settings")}><GearSix aria-hidden="true" />{labels.settings}</button>
         </nav>
-        {page === "usage" ? <CodexUsagePanel zh={zh} initialUsage={comfortUsage} onOpenSettings={() => changePage("settings")} calendarOpen={calendarOpen} onCalendarOpenChange={changeCalendarOpen} calendarPortalTarget={calendarPortalTarget} /> : page === "settings" ? <div className="control-settings-page" aria-label={labels.settings}>
+        {page === "usage" ? <CodexUsagePanel zh={zh} initialUsage={comfortUsage} onOpenSettings={() => changePage("settings")} calendarOpen={calendarOpen} onCalendarOpenChange={changeCalendarOpen} calendarPortalTarget={calendarPortalTarget} /> : page === "claude" ? <ClaudeUsagePanel zh={zh} onQuotaChanged={onRefresh} /> : page === "settings" ? <div className="control-settings-page" aria-label={labels.settings}>
         <section className="minimal-section" aria-labelledby="minimal-display-title">
           <header className="minimal-section-header"><strong id="minimal-display-title">{labels.display}</strong></header>
           <div className="minimal-font-field">
