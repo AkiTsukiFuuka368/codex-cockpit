@@ -7,8 +7,9 @@
 //! `<claude config dir>/cockpit/`, and this module only reads them.
 //!
 //! Token usage comes from Claude Code's local session transcripts
-//! (`<claude config dir>/projects/**/*.jsonl`). Only usage numbers, model ids,
-//! timestamps and the project folder name are read; message contents are skipped.
+//! (`<claude config dir>/projects/**/*.jsonl`). Usage numbers, model ids, timestamps
+//! and the project folder name are read. Session titles (or, when a session has
+//! none, the first line of its first prompt) are shown locally and never stored.
 use crate::models::{ProviderSnapshot, UsageWindow};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Serialize;
@@ -282,18 +283,6 @@ pub fn request_cost(model: &str, tokens: &Tokens) -> Option<f64> {
     )
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PriceRow {
-    pub name: String,
-    pub input: f64,
-    pub cache_write_5m: f64,
-    pub cache_write_1h: f64,
-    pub cache_read: f64,
-    pub output: f64,
-    pub note: Option<String>,
-}
-
 fn price_rows() -> Vec<PriceRow> {
     let mut seen = Vec::<&str>::new();
     let mut rows = Vec::new();
@@ -546,7 +535,20 @@ struct Record {
     date: Arc<str>,
     model: Arc<str>,
     project: Arc<str>,
+    /// Task (session or subagent) this request belongs to.
+    task: Arc<str>,
     tokens: Tokens,
+}
+
+/// What a transcript file tells us about the task it records.
+#[derive(Clone, Debug, Default)]
+struct TaskMeta {
+    id: String,
+    parent: Option<String>,
+    custom_title: Option<String>,
+    summary: Option<String>,
+    first_prompt: Option<String>,
+    project: Option<String>,
 }
 
 #[derive(Default)]
@@ -555,6 +557,7 @@ struct FileState {
     modified: Option<SystemTime>,
     offset: u64,
     records: HashMap<String, Record>,
+    meta: TaskMeta,
 }
 
 #[derive(Default)]
@@ -584,23 +587,102 @@ fn u64_at(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn folder_name(path: &str) -> Option<String> {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 fn project_name(line: &Value, fallback: &str) -> String {
     line.get("cwd")
         .and_then(Value::as_str)
-        .and_then(|cwd| {
-            cwd.trim_end_matches(['/', '\\'])
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-        })
+        .and_then(folder_name)
         .unwrap_or_else(|| fallback.to_string())
+}
+
+const TITLE_CHARS: usize = 60;
+
+fn short_title(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut title: String = line.chars().take(TITLE_CHARS).collect();
+    if line.chars().count() > TITLE_CHARS {
+        title.push('…');
+    }
+    Some(title)
+}
+
+/// The first thing the user typed, used as a title only when the session has none.
+/// Command wrappers, tool results and injected reminders are skipped.
+fn prompt_text(line: &Value) -> Option<String> {
+    if line.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let content = line.get("message")?.get("content")?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)?
+            .to_string(),
+        _ => return None,
+    };
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('<') || trimmed.starts_with("Caveat:") {
+        return None;
+    }
+    short_title(trimmed)
+}
+
+/// Record titles and the first prompt; cheap checks first so usage lines stay fast.
+fn observe_meta(text: &str, meta: &mut TaskMeta) {
+    let wants_prompt = meta.first_prompt.is_none() && text.contains("\"type\":\"user\"");
+    let wants_title = text.contains("\"type\":\"summary\"")
+        || text.contains("\"type\":\"custom-title\"")
+        || text.contains("\"type\":\"ai-title\"");
+    let wants_project = meta.project.is_none() && text.contains("\"cwd\"");
+    if !(wants_prompt || wants_title || wants_project) {
+        return;
+    }
+    let Ok(line) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    if wants_project {
+        meta.project = line
+            .get("cwd")
+            .and_then(Value::as_str)
+            .and_then(folder_name);
+    }
+    match line.get("type").and_then(Value::as_str) {
+        Some("user") if wants_prompt => meta.first_prompt = prompt_text(&line),
+        Some("custom-title") => {
+            meta.custom_title = line
+                .get("customTitle")
+                .or_else(|| line.get("title"))
+                .and_then(Value::as_str)
+                .and_then(short_title)
+        }
+        Some("summary") | Some("ai-title") => {
+            if let Some(title) = ["summary", "aiTitle", "title"]
+                .iter()
+                .find_map(|key| line.get(*key).and_then(Value::as_str))
+                .and_then(short_title)
+            {
+                meta.summary = Some(title);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Parse one transcript line into (dedupe key, record).
 fn parse_line(
     text: &str,
     fallback_project: &str,
+    task: &str,
     strings: &mut Interner,
 ) -> Option<(String, Record)> {
     // Cheap pre-filter: only assistant messages carry usage.
@@ -662,6 +744,7 @@ fn parse_line(
             date: strings.get(&date),
             model: strings.get(model),
             project: strings.get(&project_name(&line, fallback_project)),
+            task: strings.get(task),
             tokens,
         },
     ))
@@ -708,6 +791,29 @@ fn fallback_project(root: &Path, file: &Path) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// `<project>/<session>.jsonl` is a session; `<project>/<session>/subagents/<agent>.jsonl`
+/// is a subagent run that belongs to that session.
+fn task_identity(file: &Path) -> (String, Option<String>) {
+    let stem = file
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let parent_dir = file.parent();
+    let is_subagent = parent_dir
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "subagents");
+    if is_subagent {
+        if let Some(session) = parent_dir
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().to_string())
+        {
+            return (format!("{session}/{stem}"), Some(session));
+        }
+    }
+    (stem, None)
+}
+
 fn refresh_file(root: &Path, path: &Path, state: &mut FileState, strings: &mut Interner) {
     let Ok(meta) = fs::metadata(path) else { return };
     let len = meta.len();
@@ -719,6 +825,11 @@ fn refresh_file(root: &Path, path: &Path, state: &mut FileState, strings: &mut I
         // Rewritten or truncated: start over.
         *state = FileState::default();
     }
+    if state.meta.id.is_empty() {
+        let (id, parent) = task_identity(path);
+        state.meta.id = id;
+        state.meta.parent = parent;
+    }
     let Ok(mut file) = fs::File::open(path) else {
         return;
     };
@@ -726,6 +837,7 @@ fn refresh_file(root: &Path, path: &Path, state: &mut FileState, strings: &mut I
         return;
     }
     let project = fallback_project(root, path);
+    let task = state.meta.id.clone();
     let mut reader = BufReader::new(file);
     let mut offset = state.offset;
     let mut buffer = Vec::new();
@@ -743,8 +855,11 @@ fn refresh_file(root: &Path, path: &Path, state: &mut FileState, strings: &mut I
             continue;
         }
         if let Ok(text) = std::str::from_utf8(&buffer) {
-            if let Some((key, record)) = parse_line(text.trim_end(), &project, strings) {
+            let text = text.trim_end();
+            if let Some((key, record)) = parse_line(text, &project, &task, strings) {
                 keep_larger(&mut state.records, key, record);
+            } else {
+                observe_meta(text, &mut state.meta);
             }
         }
     }
@@ -753,118 +868,102 @@ fn refresh_file(root: &Path, path: &Path, state: &mut FileState, strings: &mut I
     state.modified = modified;
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageRow {
-    pub id: String,
-    pub name: String,
-    pub input_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    /// Cost of the rows whose model has a known price.
-    pub estimated_cost_usd: f64,
-    /// True when some tokens belong to a model without a known price.
-    pub cost_incomplete: bool,
+// ----- Aggregation into the same shapes the Codex usage page reads -----
+
+/// Token and cost totals for one model on one day.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ModelTotals {
+    tokens: Tokens,
+    requests: u64,
+    cost: f64,
+    /// Some requests used a model without a known price.
+    unpriced: bool,
 }
 
-impl UsageRow {
+impl ModelTotals {
     fn add(&mut self, record: &Record) {
-        let tokens = &record.tokens;
-        self.input_tokens += tokens.input;
-        self.cache_write_tokens += tokens.cache_write_5m + tokens.cache_write_1h;
-        self.cache_read_tokens += tokens.cache_read;
-        self.output_tokens += tokens.output;
-        self.total_tokens += tokens.total();
-        match request_cost(&record.model, tokens) {
-            Some(cost) => self.estimated_cost_usd += cost,
-            None => self.cost_incomplete = true,
+        self.tokens.input += record.tokens.input;
+        self.tokens.cache_write_5m += record.tokens.cache_write_5m;
+        self.tokens.cache_write_1h += record.tokens.cache_write_1h;
+        self.tokens.cache_read += record.tokens.cache_read;
+        self.tokens.output += record.tokens.output;
+        self.requests += 1;
+        match request_cost(&record.model, &record.tokens) {
+            Some(cost) => self.cost += cost,
+            None => self.unpriced = true,
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DayUsage {
-    pub date: String,
-    pub requests: u64,
-    pub models: Vec<UsageRow>,
-    pub projects: Vec<UsageRow>,
+/// date → model → totals
+type DailyLedger = BTreeMap<Arc<str>, BTreeMap<Arc<str>, ModelTotals>>;
+
+fn add_to(ledger: &mut DailyLedger, record: &Record) {
+    ledger
+        .entry(record.date.clone())
+        .or_default()
+        .entry(record.model.clone())
+        .or_default()
+        .add(record);
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CollectorStatus {
-    /// The status line collector is configured in Claude Code settings.
-    pub statusline_installed: bool,
-    /// Another status line command is configured, so ours was not installed.
-    pub statusline_conflict: bool,
-    /// The wrapper for `claude -p` runs exists.
-    pub wrapper_path: Option<String>,
-    /// Last time any window was recorded (RFC 3339).
-    pub last_observed_at: Option<String>,
+/// Cache writes are billed as (more expensive) input, so they count as uncached input here.
+fn metrics_json(totals: &ModelTotals) -> serde_json::Map<String, Value> {
+    let tokens = &totals.tokens;
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "inputTokens".into(),
+        Value::from(tokens.input + tokens.cache_write_5m + tokens.cache_write_1h),
+    );
+    map.insert("cachedInputTokens".into(), Value::from(tokens.cache_read));
+    map.insert("outputTokens".into(), Value::from(tokens.output));
+    map.insert("reasoningTokens".into(), Value::from(0));
+    map.insert("totalTokens".into(), Value::from(tokens.total()));
+    map.insert(
+        "estimatedCostUsd".into(),
+        if totals.unpriced {
+            Value::Null
+        } else {
+            Value::from(totals.cost)
+        },
+    );
+    map
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeUsage {
-    /// "ready", "empty" (no transcripts yet) or "unavailable" (no Claude Code folder).
-    pub status: String,
-    pub directory: Option<String>,
-    pub fetched_at: String,
-    pub transcript_files: usize,
-    pub days: Vec<DayUsage>,
-    pub prices: Vec<PriceRow>,
-    pub price_source: String,
-    pub collector: CollectorStatus,
-}
-
-/// Requests, per-model rows and per-project rows for one local date.
-type DayAccumulator = (
-    u64,
-    HashMap<Arc<str>, UsageRow>,
-    HashMap<Arc<str>, UsageRow>,
-);
-
-fn aggregate(records: &HashMap<&String, &Record>) -> Vec<DayUsage> {
-    let mut days: BTreeMap<Arc<str>, DayAccumulator> = BTreeMap::new();
-    for record in records.values() {
-        let (requests, models, projects) = days.entry(record.date.clone()).or_default();
-        *requests += 1;
-        models
-            .entry(record.model.clone())
-            .or_insert_with(|| UsageRow {
-                id: record.model.to_string(),
-                name: display_model_name(&record.model),
-                ..UsageRow::default()
-            })
-            .add(record);
-        projects
-            .entry(record.project.clone())
-            .or_insert_with(|| UsageRow {
-                id: record.project.to_string(),
-                name: record.project.to_string(),
-                ..UsageRow::default()
-            })
-            .add(record);
+/// `Record<date, DailyModelUsage>` as used by the Codex usage page.
+fn daily_json(ledger: &DailyLedger) -> Value {
+    let mut days = serde_json::Map::new();
+    for (date, models) in ledger {
+        let mut total = ModelTotals::default();
+        let mut rows = Vec::new();
+        for (model, totals) in models {
+            total.tokens.input += totals.tokens.input;
+            total.tokens.cache_write_5m += totals.tokens.cache_write_5m;
+            total.tokens.cache_write_1h += totals.tokens.cache_write_1h;
+            total.tokens.cache_read += totals.tokens.cache_read;
+            total.tokens.output += totals.tokens.output;
+            total.requests += totals.requests;
+            total.cost += totals.cost;
+            total.unpriced |= totals.unpriced;
+            let mut row = metrics_json(totals);
+            row.insert("id".into(), Value::from(model.to_string()));
+            row.insert("name".into(), Value::from(display_model_name(model)));
+            rows.push(Value::Object(row));
+        }
+        let mut day = metrics_json(&total);
+        day.insert("models".into(), Value::Array(rows));
+        days.insert(date.to_string(), Value::Object(day));
     }
-    let sorted = |map: HashMap<Arc<str>, UsageRow>| {
-        let mut rows: Vec<UsageRow> = map.into_values().collect();
-        rows.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens).then(a.id.cmp(&b.id)));
-        rows
-    };
-    days.into_iter()
-        .map(|(date, (requests, models, projects))| DayUsage {
-            date: date.to_string(),
-            requests,
-            models: sorted(models),
-            projects: sorted(projects),
-        })
-        .collect()
+    Value::Object(days)
 }
 
-fn scan(base: &Path) -> (usize, Vec<DayUsage>) {
+struct ScanResult {
+    files: usize,
+    records: Vec<Record>,
+    tasks: Vec<TaskMeta>,
+}
+
+fn scan(base: &Path) -> ScanResult {
     let root = base.join("projects");
     let mut guard = match CACHE.lock() {
         Ok(guard) => guard,
@@ -890,9 +989,12 @@ fn scan(base: &Path) -> (usize, Vec<DayUsage>) {
         let state = states.entry(path.clone()).or_default();
         refresh_file(&root, path, state, strings);
     }
-    // The same message can appear in several files (resumed or forked sessions).
+    // The same message can appear in several files (resumed or forked sessions):
+    // count it once, in the file that first recorded it (the oldest session).
+    let mut ordered: Vec<(&PathBuf, &FileState)> = states.iter().collect();
+    ordered.sort_by(|a, b| a.1.modified.cmp(&b.1.modified).then(a.0.cmp(b.0)));
     let mut merged: HashMap<&String, &Record> = HashMap::new();
-    for state in states.values() {
+    for (_, state) in &ordered {
         for (key, record) in &state.records {
             match merged.get(key) {
                 Some(existing) if existing.tokens.total() >= record.tokens.total() => {}
@@ -902,7 +1004,208 @@ fn scan(base: &Path) -> (usize, Vec<DayUsage>) {
             }
         }
     }
-    (files.len(), aggregate(&merged))
+    ScanResult {
+        files: files.len(),
+        records: merged.into_values().cloned().collect(),
+        tasks: ordered
+            .iter()
+            .map(|(_, state)| state.meta.clone())
+            .collect(),
+    }
+}
+
+fn device_id() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|| "local".into())
+}
+
+pub const CLAUDE_GROUP_ID: &str = "claude-local";
+const PRICING_UPDATED_AT: &str = "2026-10-18";
+
+fn task_name(meta: &TaskMeta, zh_fallback: bool) -> String {
+    meta.custom_title
+        .clone()
+        .or_else(|| meta.summary.clone())
+        .or_else(|| meta.first_prompt.clone())
+        .unwrap_or_else(|| {
+            let short: String = meta
+                .id
+                .rsplit('/')
+                .next()
+                .unwrap_or(&meta.id)
+                .chars()
+                .take(8)
+                .collect();
+            if zh_fallback {
+                format!("会话 {short}")
+            } else {
+                format!("Session {short}")
+            }
+        })
+}
+
+/// Both payloads the Codex usage page reads, built from Claude Code transcripts.
+fn ledgers(base: Option<&Path>) -> (Value, Value) {
+    let now = Utc::now().to_rfc3339();
+    let device = device_id();
+    let Some(base) = base else {
+        let usage = serde_json::json!({
+            "groups": [{ "id": CLAUDE_GROUP_ID, "name": device, "deviceIds": [device] }],
+            "defaultGroupId": CLAUDE_GROUP_ID, "localGroupId": CLAUDE_GROUP_ID,
+            "fetchedAt": now, "status": "unavailable", "devices": [],
+            "warnings": ["claude_directory_missing"], "projectBreakdownAvailable": true,
+        });
+        let projects = serde_json::json!({
+            "deviceId": device, "updatedAt": now, "status": "unavailable", "coverage": "local",
+            "scannedFiles": 0, "pricingSource": "bundled-catalog", "pricingUpdatedAt": PRICING_UPDATED_AT,
+            "taskMetadataCoverage": "complete", "projects": [], "tasks": [], "peerTasks": [],
+            "warnings": ["claude_directory_missing"],
+        });
+        return (usage, projects);
+    };
+    let result = scan(base);
+    let mut device_ledger = DailyLedger::new();
+    let mut project_ledgers: BTreeMap<Arc<str>, DailyLedger> = BTreeMap::new();
+    let mut task_ledgers: HashMap<Arc<str>, DailyLedger> = HashMap::new();
+    let mut task_projects: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+    let mut unpriced = false;
+    for record in &result.records {
+        unpriced |= price_entry(&record.model).is_none();
+        add_to(&mut device_ledger, record);
+        add_to(
+            project_ledgers.entry(record.project.clone()).or_default(),
+            record,
+        );
+        add_to(task_ledgers.entry(record.task.clone()).or_default(), record);
+        task_projects
+            .entry(record.task.clone())
+            .or_insert_with(|| record.project.clone());
+    }
+    let mut warnings = Vec::new();
+    if result.records.is_empty() {
+        warnings.push("no_usage_records");
+    }
+    if unpriced {
+        warnings.push("missing_model_price");
+    }
+    let known: std::collections::HashSet<&str> =
+        result.tasks.iter().map(|meta| meta.id.as_str()).collect();
+    let tasks: Vec<Value> = result
+        .tasks
+        .iter()
+        .filter_map(|meta| {
+            let ledger = task_ledgers.get(meta.id.as_str())?;
+            let project = task_projects
+                .get(meta.id.as_str())
+                .map(|value| value.to_string())
+                .or_else(|| meta.project.clone());
+            let parent = meta.parent.as_deref().filter(|id| known.contains(id));
+            let mut task = serde_json::json!({
+                "id": meta.id,
+                "name": task_name(meta, true),
+                "relation": if parent.is_some() { "subagent" } else { "root" },
+                "daily": daily_json(ledger),
+            });
+            if let Some(project) = project {
+                task["projectName"] = Value::from(project);
+            }
+            if let Some(parent) = parent {
+                task["parentId"] = Value::from(parent);
+                task["rootId"] = Value::from(parent);
+                task["agentRole"] = Value::from("subagent");
+            } else {
+                task["rootId"] = Value::from(meta.id.clone());
+            }
+            Some(task)
+        })
+        .collect();
+    let projects: Vec<Value> = project_ledgers
+        .iter()
+        .map(|(name, ledger)| {
+            serde_json::json!({ "id": name.to_string(), "name": name.to_string(), "daily": daily_json(ledger) })
+        })
+        .collect();
+    let status = "ready";
+    let usage = serde_json::json!({
+        "groups": [{ "id": CLAUDE_GROUP_ID, "name": device, "deviceIds": [device] }],
+        "defaultGroupId": CLAUDE_GROUP_ID, "localGroupId": CLAUDE_GROUP_ID,
+        "fetchedAt": now, "status": status,
+        "devices": if device_ledger.is_empty() { Vec::new() } else { vec![serde_json::json!({
+            "id": device, "updatedAt": now, "stale": false, "daily": daily_json(&device_ledger), "ranges": {},
+        })] },
+        "warnings": warnings, "projectBreakdownAvailable": true,
+    });
+    let projects = serde_json::json!({
+        "deviceId": device, "updatedAt": now, "status": status, "coverage": "local",
+        "scannedFiles": result.files, "pricingSource": "bundled-catalog", "pricingUpdatedAt": PRICING_UPDATED_AT,
+        "taskMetadataCoverage": "complete", "projects": projects, "tasks": tasks, "peerTasks": [],
+        "warnings": warnings,
+    });
+    (usage, projects)
+}
+
+fn claude_base() -> Option<PathBuf> {
+    config_dir().filter(|path| path.is_dir())
+}
+
+/// Token ledger for the Claude usage page (same shape as `get_tokei_usage`).
+#[tauri::command]
+pub async fn get_claude_tokei_usage() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| ledgers(claude_base().as_deref()).0)
+        .await
+        .map_err(|_| "claude_usage_unavailable".to_string())
+}
+
+/// Projects and tasks for the Claude usage page (same shape as `get_codex_project_usage`).
+#[tauri::command]
+pub async fn get_claude_project_usage() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| ledgers(claude_base().as_deref()).1)
+        .await
+        .map_err(|_| "claude_usage_unavailable".to_string())
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceRow {
+    pub name: String,
+    pub input: f64,
+    pub cache_write_5m: f64,
+    pub cache_write_1h: f64,
+    pub cache_read: f64,
+    pub output: f64,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectorStatus {
+    /// The status line collector is configured in Claude Code settings.
+    pub statusline_installed: bool,
+    /// Another status line command is configured, so ours was not installed.
+    pub statusline_conflict: bool,
+    /// The wrapper for `claude -p` runs exists.
+    pub wrapper_path: Option<String>,
+    /// Last time any window was recorded (RFC 3339).
+    pub last_observed_at: Option<String>,
+}
+
+/// Setup state and the price table for the Claude page's extras.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeSetup {
+    /// False when there is no Claude Code folder on this computer.
+    pub available: bool,
+    pub directory: Option<String>,
+    pub prices: Vec<PriceRow>,
+    pub price_source: String,
+    pub collector: CollectorStatus,
 }
 
 fn settings_path(base: &Path) -> PathBuf {
@@ -966,43 +1269,28 @@ fn collector_status(base: &Path) -> CollectorStatus {
     }
 }
 
-fn read_usage() -> ClaudeUsage {
-    let fetched_at = Utc::now().to_rfc3339();
-    let prices = price_rows();
-    let price_source = "Anthropic API pricing page, 2026-10-18".to_string();
-    let Some(base) = config_dir().filter(|path| path.is_dir()) else {
-        return ClaudeUsage {
-            status: "unavailable".into(),
-            directory: config_dir().map(|path| path.to_string_lossy().to_string()),
-            fetched_at,
-            transcript_files: 0,
-            days: Vec::new(),
-            prices,
-            price_source,
-            collector: CollectorStatus {
+fn read_setup() -> ClaudeSetup {
+    let base = claude_base();
+    ClaudeSetup {
+        available: base.is_some(),
+        directory: config_dir().map(|path| path.to_string_lossy().to_string()),
+        prices: price_rows(),
+        price_source: format!("Anthropic API pricing page, {PRICING_UPDATED_AT}"),
+        collector: match base {
+            Some(base) => collector_status(&base),
+            None => CollectorStatus {
                 statusline_installed: false,
                 statusline_conflict: false,
                 wrapper_path: None,
                 last_observed_at: None,
             },
-        };
-    };
-    let (files, days) = scan(&base);
-    ClaudeUsage {
-        status: if days.is_empty() { "empty" } else { "ready" }.into(),
-        directory: Some(base.to_string_lossy().to_string()),
-        fetched_at,
-        transcript_files: files,
-        days,
-        prices,
-        price_source,
-        collector: collector_status(&base),
+        },
     }
 }
 
 #[tauri::command]
-pub async fn get_claude_usage() -> Result<ClaudeUsage, String> {
-    tokio::task::spawn_blocking(read_usage)
+pub async fn get_claude_setup() -> Result<ClaudeSetup, String> {
+    tokio::task::spawn_blocking(read_setup)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())
 }
@@ -1333,7 +1621,7 @@ mod tests {
         };
         let mut map = HashMap::new();
         for out in [5, 50, 20] {
-            let (key, record) = parse_line(&line(out), "fallback", &mut strings).unwrap();
+            let (key, record) = parse_line(&line(out), "fallback", "task", &mut strings).unwrap();
             keep_larger(&mut map, key, record);
         }
         assert_eq!(map.len(), 1);
@@ -1352,10 +1640,11 @@ mod tests {
         assert!(parse_line(
             r#"{"type":"user","message":{"usage":{}}}"#,
             "x",
+            "task",
             &mut strings
         )
         .is_none());
-        assert!(parse_line(r#"{"type":"assistant","timestamp":"2026-10-18T01:00:00Z","uuid":"u","message":{"model":"<synthetic>","usage":{"input_tokens":1}}}"#, "x", &mut strings).is_none());
+        assert!(parse_line(r#"{"type":"assistant","timestamp":"2026-10-18T01:00:00Z","uuid":"u","message":{"model":"<synthetic>","usage":{"input_tokens":1}}}"#, "x", "task", &mut strings).is_none());
     }
 
     #[test]
@@ -1370,22 +1659,94 @@ mod tests {
         )
         };
         fs::write(&file, entry("1")).unwrap();
-        let (_, days) = scan(&base);
-        assert_eq!(days.iter().map(|d| d.requests).sum::<u64>(), 1);
+        assert_eq!(scan(&base).records.len(), 1);
         let mut text = fs::read_to_string(&file).unwrap();
         text.push_str(&entry("2"));
         text.push_str("{\"partial\":"); // still being written
         fs::write(&file, text).unwrap();
-        let (_, days) = scan(&base);
-        assert_eq!(days.iter().map(|d| d.requests).sum::<u64>(), 2);
-        let model = &days[0].models[0];
-        assert_eq!(model.name, "Claude Sonnet 5.5");
-        assert_eq!(model.total_tokens, 2200);
-        assert!(
-            (model.estimated_cost_usd - 2.0 * (1000.0 * 2.0 + 100.0 * 10.0) / 1e6).abs() < 1e-12
-        );
-        assert_eq!(days[0].projects[0].name, "C--work-demo");
+        let result = scan(&base);
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.files, 1);
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ledgers_match_the_codex_usage_page_shapes() {
+        let base = temp_dir("ledgers");
+        let project = base.join("projects").join("C--work-demo");
+        let sub = project.join("sess1").join("subagents");
+        fs::create_dir_all(&sub).unwrap();
+        let usage = |id: &str, model: &str, cwd: &str| {
+            format!(
+            "{{\"type\":\"assistant\",\"cwd\":\"{cwd}\",\"requestId\":\"r{id}\",\"timestamp\":\"2026-10-18T03:00:00Z\",\"message\":{{\"id\":\"m{id}\",\"model\":\"{model}\",\"usage\":{{\"input_tokens\":1000,\"cache_creation_input_tokens\":200,\"cache_read_input_tokens\":5000,\"output_tokens\":100}}}}}}\n"
+        )
+        };
+        let main = format!(
+            "{}{}{}{}",
+            "{\"type\":\"user\",\"cwd\":\"C:\\\\work\\\\demo\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/clear</command-name>\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"修复登录页面的样式问题\\n细节...\"}]}}\n",
+            usage("1", "claude-opus-5-5", "C:\\\\work\\\\demo"),
+            usage("2", "mystery-model", "C:\\\\work\\\\demo"),
+        );
+        fs::write(project.join("sess1.jsonl"), main).unwrap();
+        fs::write(
+            sub.join("agent-a1.jsonl"),
+            usage("3", "claude-haiku-5-5", "C:\\\\work\\\\demo"),
+        )
+        .unwrap();
+        // A resumed session repeats message 1; it must count once.
+        fs::write(
+            project.join("sess2.jsonl"),
+            format!(
+                "{{\"type\":\"summary\",\"summary\":\"续写会话\"}}\n{}",
+                usage("1", "claude-opus-5-5", "C:\\\\work\\\\demo")
+            ),
+        )
+        .unwrap();
+        let (usage_json, projects_json) = ledgers(Some(&base));
+        let device = &usage_json["devices"][0];
+        let day = &device["daily"]["2026-10-18"];
+        assert!(day.is_object(), "{usage_json}");
+        assert_eq!(day["totalTokens"], 3 * 6300);
+        assert_eq!(day["inputTokens"], 3 * 1200);
+        assert_eq!(day["cachedInputTokens"], 3 * 5000);
+        assert!(
+            day["estimatedCostUsd"].is_null(),
+            "unknown model makes the day partial"
+        );
+        let models = day["models"].as_array().unwrap();
+        let opus = models
+            .iter()
+            .find(|m| m["id"] == "claude-opus-5-5")
+            .unwrap();
+        assert_eq!(opus["name"], "Claude Opus 5.5");
+        let expected = (1000.0 * 4.0 + 200.0 * 5.0 + 5000.0 * 0.2 + 100.0 * 20.0) / 1e6;
+        assert!((opus["estimatedCostUsd"].as_f64().unwrap() - expected).abs() < 1e-12);
+        assert!(models
+            .iter()
+            .any(|m| m["id"] == "mystery-model" && m["estimatedCostUsd"].is_null()));
+        assert_eq!(usage_json["groups"][0]["deviceIds"][0], device["id"]);
+        assert_eq!(projects_json["deviceId"], device["id"]);
+        assert_eq!(projects_json["projects"][0]["name"], "demo");
+        assert!(projects_json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w == "missing_model_price"));
+        let tasks = projects_json["tasks"].as_array().unwrap();
+        let root = tasks.iter().find(|t| t["id"] == "sess1").unwrap();
+        assert_eq!(root["name"], "修复登录页面的样式问题");
+        assert_eq!(root["relation"], "root");
+        assert_eq!(root["projectName"], "demo");
+        let child = tasks.iter().find(|t| t["id"] == "sess1/agent-a1").unwrap();
+        assert_eq!(child["relation"], "subagent");
+        assert_eq!(child["parentId"], "sess1");
+        // sess2 only repeated an already-counted message, so it has no usage of its own.
+        assert!(tasks.iter().all(|t| t["id"] != "sess2"));
+        let _ = fs::remove_dir_all(&base);
+
+        let (missing, _) = ledgers(None);
+        assert_eq!(missing["status"], "unavailable");
     }
 
     #[test]

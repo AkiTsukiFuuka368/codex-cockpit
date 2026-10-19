@@ -42,7 +42,7 @@ it.each(["en", "zh-CN"] as const)("offers the requested fonts, with clear local-
 it("puts Usage first in the control center navigation", () => {
   render(<ControlCenter preferences={DEFAULT_WIDGET_PREFERENCES} language="zh-CN" onClose={() => {}} onRefresh={() => {}} onPreferences={() => {}} autostartEnabled={false} onAutostart={() => {}} />);
   const nav = screen.getByRole("navigation", { name: "控制中心页面" });
-  expect(Array.from(nav.querySelectorAll("button")).map(button => button.textContent)).toEqual(["用量", "额度", "Claude", "设置"]);
+  expect(Array.from(nav.querySelectorAll("button")).map(button => button.textContent)).toEqual(["用量", "额度", "设置"]);
   expect(screen.getByRole("button", { name: "用量" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "额度" })).toHaveAttribute("aria-pressed", "false");
   fireEvent.click(screen.getByRole("button", { name: "额度" }));
@@ -248,7 +248,7 @@ describe("ControlCenter essentials", () => {
     fireEvent.pointerDown(screen.getByRole("dialog"), { button: 0 });
     fireEvent.pointerDown(screen.getByText("Codex Cockpit"), { button: 0 });
     fireEvent.click(screen.getByRole("button", { name: "Usage" }));
-    fireEvent.pointerDown(screen.getByRole("status"), { button: 0 });
+    fireEvent.pointerDown(screen.getAllByRole("status")[0], { button: 0 });
 
     expect(onDrag).not.toHaveBeenCalled();
   });

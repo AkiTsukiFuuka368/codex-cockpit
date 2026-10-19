@@ -190,6 +190,7 @@ describe("widget transitions", () => {
     ]);
     expect(api.invoke).toHaveBeenCalledWith("set_control_center_calendar_open", {
       open: true,
+      wide: false,
       workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1040 } },
     });
     await closeControlCenterWindow();

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GearSix } from "@phosphor-icons/react";
 import { isTauri } from "../lib/bridge";
 import { getProjectUsage, getTokeiUsage } from "../lib/tokeiBridge";
+import { getClaudeProjectUsage, getClaudeTokeiUsage } from "../lib/claudeUsage";
 import { aggregateGroupUsage, aggregateGlobalUsage, aggregateProjectUsage, aggregateTaskUsage, aggregateSyncedTaskUsage, formatTokens, metricValue, reconcileTaskUsage, withLiveLocalUsage, type AggregatedTaskUsage, type UsageMetrics, type UsageMetric, type ProjectUsageSnapshot, type ModelUsage, type TokeiUsage, type UsagePeriod } from "../lib/tokeiUsage";
 import { UsageChart, usageColor, usageRankColor } from "./UsageChart";
 import { modelUsageColors, UNRANKED_MODEL_COLOR } from "../lib/modelUsageColors";
@@ -36,7 +37,13 @@ function ModelRow({ model, max, zh, color, metric, total }: { model: ModelUsage;
   </details>;
 }
 
-export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () => undefined, calendarOpen, onCalendarOpenChange, calendarPortalTarget }: { zh: boolean; initialUsage?: TokeiUsage | null; onOpenSettings?: () => void; calendarOpen?: boolean; onCalendarOpenChange?: (open: boolean) => void; calendarPortalTarget?: HTMLElement | null }) {
+export type UsageSource = "codex" | "claude";
+
+export function CodexUsagePanel({ zh, source = "codex", initialUsage = null, onOpenSettings = () => undefined, calendarOpen, onCalendarOpenChange, calendarPortalTarget }: { zh: boolean; source?: UsageSource; initialUsage?: TokeiUsage | null; onOpenSettings?: () => void; calendarOpen?: boolean; onCalendarOpenChange?: (open: boolean) => void; calendarPortalTarget?: HTMLElement | null }) {
+  const claude = source === "claude";
+  const sourceName = claude ? "Claude" : "Codex";
+  const fetchUsage = claude ? getClaudeTokeiUsage : getTokeiUsage;
+  const fetchProjects = claude ? getClaudeProjectUsage : getProjectUsage;
   const [data, setData] = useState<TokeiUsage | null>(initialUsage);
   const [error, setError] = useState(false);
   const [groupId, setGroupId] = useState<string | null>(initialUsage?.localGroupId ?? null);
@@ -59,7 +66,7 @@ export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () =
       if (busy || !active) return;
       busy = true;
       try {
-        const next = await getTokeiUsage();
+        const next = await fetchUsage();
         if (active) {
           setData(next); setError(false);
           if (!scopeInitialized.current) {
@@ -101,7 +108,7 @@ export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () =
       busy = true;
       let delay = 60000;
       try {
-        const next = await getProjectUsage();
+        const next = await fetchProjects();
         if (active) { setProjects(next); setProjectError(false); }
         if (next.warnings.includes("scan_limit")) delay = 1500;
       }
@@ -152,18 +159,20 @@ export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () =
   const latest = summary?.devices.map((device) => device.updatedAt).filter((date): date is string => Boolean(date)).sort().at(-1);
   const noObservedUsage = Boolean(liveData && !liveData.devices.some(device => Object.keys(device.daily).length || Object.keys(device.ranges).length));
   const localReadUnavailable = projectError || projects?.status === "unavailable";
-  const localReadFailureText = projects?.warnings.includes("codex_directory_missing")
+  const localReadFailureText = projects?.warnings.includes("claude_directory_missing")
+    ? (zh ? "这台电脑上还没有 Claude Code 的数据目录（~/.claude）。" : "No Claude Code folder (~/.claude) on this computer yet.")
+    : projects?.warnings.includes("codex_directory_missing")
     ? (zh ? "找不到 Codex 数据目录，当前显示上次缓存。" : "Codex data folder not found; showing the last cached usage.")
     : projects?.warnings.includes("source_permission_denied")
       ? (zh ? "无法读取 Codex 数据目录，当前显示上次缓存。请检查读取权限。" : "Cannot read the Codex data folder; showing the last cached usage. Check read permissions.")
       : projects?.warnings.includes("no_usage_records")
-        ? (zh ? "当前目录没有可统计的记录，已保留上次缓存。" : "No usage records in the current folder; the previous cache is retained.")
+        ? (claude ? (zh ? "还没有 Claude Code 用量记录。" : "No Claude Code usage recorded yet.") : (zh ? "当前目录没有可统计的记录，已保留上次缓存。" : "No usage records in the current folder; the previous cache is retained."))
         : (zh ? "本机记录刷新失败，当前显示上次缓存。" : "Local records could not be refreshed; showing the last cached usage.");
   const scopeValue = (value: UsageMetrics | null) => metric === "cost" ? costLabel(value?.estimatedCostUsd ?? null, zh) : formatTokens(value?.totalTokens ?? 0, zh);
 
-  if (!data) return <section className="codex-usage-panel"><p className={error ? "usage-error" : "usage-note"} role="status">{error ? (zh ? "暂时无法读取用量，请稍后重试。" : "Usage is unavailable. Try again shortly.") : (zh ? "正在读取用量…" : "Loading usage…")}</p>{error && <LocalUsageSourceSettings zh={zh} compact />}</section>;
+  if (!data) return <section className="codex-usage-panel"><p className={error ? "usage-error" : "usage-note"} role="status">{error ? (zh ? "暂时无法读取用量，请稍后重试。" : "Usage is unavailable. Try again shortly.") : (zh ? "正在读取用量…" : "Loading usage…")}</p>{error && !claude && <LocalUsageSourceSettings zh={zh} compact />}</section>;
 
-  return <section className="codex-usage-panel" aria-label={zh ? "Codex 用量" : "Codex usage"}>
+  return <section className={`codex-usage-panel usage-source-${source}`} aria-label={zh ? `${sourceName} 用量` : `${sourceName} usage`}>
     <div className="usage-toolbar">
       <select aria-label={zh ? "用量分组" : "Usage group"} value={global ? "global" : groupId === null ? "" : `group:${groupId}`} onChange={(event) => { const isGlobal = event.target.value === "global"; setGlobal(isGlobal); if (isGlobal) { setView("users"); setMetric("cost"); } else { setGroupId(event.target.value.slice(6) || null); if (view === "users") setView("models"); } setShowAll(false); }}>
         <option value="" disabled>{zh ? "选择分组" : "Choose group"}</option>
@@ -179,16 +188,18 @@ export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () =
         <option value="tasks">{zh ? "按任务" : "By task"}</option><option value="models">{zh ? "按模型" : "By model"}</option>
       </select>
       <UsageCalendar devices={fullDevices} metric={metric} zh={zh} selection={dateRange} open={calendarOpen} onOpenChange={onCalendarOpenChange} portalTarget={calendarPortalTarget} onMetricChange={setMetric} onSelect={range => { setDateRange(range); setShowAll(false); }} />
-      <button type="button" className="usage-settings-button" aria-label={zh ? "打开组员设置" : "Open member settings"} title={zh ? "打开组员设置" : "Open member settings"} onClick={onOpenSettings}><GearSix /></button>
+      {!claude && <button type="button" className="usage-settings-button" aria-label={zh ? "打开组员设置" : "Open member settings"} title={zh ? "打开组员设置" : "Open member settings"} onClick={onOpenSettings}><GearSix /></button>}
     </div>
 
     {!noObservedUsage && localReadUnavailable && <div className="usage-note">
       <p role="status">{localReadFailureText}</p>
-      <button type="button" className="usage-text-button" onClick={onOpenSettings}>{zh ? "检查 Codex 数据目录" : "Check Codex data folder"}</button>
+      {!claude && <button type="button" className="usage-text-button" onClick={onOpenSettings}>{zh ? "检查 Codex 数据目录" : "Check Codex data folder"}</button>}
     </div>}
 
     {noObservedUsage && (projects || projectError)
-      ? <LocalUsageSourceSettings zh={zh} compact noRecords={projects?.warnings.includes("no_usage_records")} />
+      ? claude
+        ? <p className="usage-empty" role="status">{projects?.warnings.includes("claude_directory_missing") ? localReadFailureText : (zh ? "还没有 Claude Code 用量记录。在 Claude 桌面端用 Code 功能，或让 Codex 调用 Claude 后，这里会自动出现。" : "No Claude Code usage yet. It appears after you use Claude Code.")}</p>
+        : <LocalUsageSourceSettings zh={zh} compact noRecords={projects?.warnings.includes("no_usage_records")} />
       : <CustomTaskStatistics key={[global ? "global" : groupId, period, dateRange?.start, dateRange?.end, view, metric].join("|")} rows={taskUsage?.rows ?? []} zh={zh} loading={!projects && !projectError} error={projectError} partial={projects?.status === "partial" || projects?.peerTasks?.some(peer => peer.partial)} periodLabel={dateRange ? rangeLabel(dateRange) : periodLabel(period, zh)} />}
 
     {!group && !global ? <p className="usage-empty">{zh ? "选择一名组员，或到设置中分配设备。" : "Choose a member, or assign devices in settings."}</p> : <>
@@ -225,11 +236,12 @@ export function CodexUsagePanel({ zh, initialUsage = null, onOpenSettings = () =
           : <p className="usage-note">{zh
             ? `本机未归属 ${scopeValue(taskReconciliation.outstandingLocal)} · 其他设备 ${scopeValue(taskReconciliation.nonLocal)}`
             : `Unattributed local ${scopeValue(taskReconciliation.outstandingLocal)} · Other devices ${scopeValue(taskReconciliation.nonLocal)}`}</p>)}
-          <p>{global ? (zh ? "全局按现有用户分组汇总，每台设备只计一次；未分组设备单列。" : "Global combines configured user groups, counting each device once; unassigned devices are separate.") : (zh ? "仅计所选分组的 Codex 用量。" : "Only Codex usage from this group.")}{zh ? "Token 包含输入、缓存输入和输出，推理不重复累加。" : "Tokens include uncached input, cache and output; reasoning is not added twice."}</p>
+          <p>{global ? (zh ? "全局按现有用户分组汇总，每台设备只计一次；未分组设备单列。" : "Global combines configured user groups, counting each device once; unassigned devices are separate.") : (zh ? `仅计所选分组的 ${sourceName} 用量。` : `Only ${sourceName} usage from this group.`)}{zh ? "Token 包含输入、缓存输入和输出，推理不重复累加。" : "Tokens include uncached input, cache and output; reasoning is not added twice."}</p>
           <p>{zh ? "金额优先使用自己的或共享空间的价格表，没有配置时使用 App 自带的参考价格；也会保留兼容的历史估算。它不是订阅实际扣费，也不是官方剩余额度。" : "Costs prefer your own or shared-space catalog, falling back to built-in reference prices and compatible historical estimates. They are not subscription charges or remaining quota."}</p>
           <p>{zh ? "日账与时段汇总不重复累加。仅在时间边界匹配时使用汇总；本周不等于近7天。离线设备保留截至快照时的统计。" : "Daily ledgers and range totals are never added twice. Ranges require matching date bounds; this week is not rolling seven days. Offline totals stop at their snapshot time."}</p>
           {view === "models" && <p>{zh ? "颜色按GPT数字代际从新到旧等间隔取红到蓝；同代按名称固定排序。隐藏或代际不明的模型为灰色；展开更多时重新均分色带。仅有名称的旧快照按原名称汇总，不猜测具体变体。" : "Visible GPT generations are spaced evenly from new/red to old/blue, with name-based ties. Hidden or unversioned models are gray; expanding resamples the palette. Name-only legacy rows stay name-grouped without guessing variants."}</p>}
-          {view === "tasks" && <p>{zh ? "任务标题、每日用量及子 Agent 归属通过 Cloudflare 同步；不上传消息正文或项目路径。任务按设备与任务 ID 区分，只在同一设备内合并已证实的子 Agent。其他设备需升级并上传后才有任务明细；离线时保留上次快照。" : "Task titles, daily usage and subagent relationships sync via Cloudflare, without messages or project paths. Identity combines device and task IDs; subagents fold only within one device. Peers need to upgrade and upload task details; offline snapshots remain available."}</p>}
+          {view === "tasks" && claude && <p>{zh ? "每个任务是一次 Claude Code 会话，子 Agent 归入所属会话。标题取会话标题，没有时取第一条提问的开头，只在本机显示，不上传。" : "Each task is one Claude Code session; subagents fold into their session. Titles come from the session title or the start of the first prompt, shown locally only."}</p>}
+          {view === "tasks" && !claude && <p>{zh ? "任务标题、每日用量及子 Agent 归属通过 Cloudflare 同步；不上传消息正文或项目路径。任务按设备与任务 ID 区分，只在同一设备内合并已证实的子 Agent。其他设备需升级并上传后才有任务明细；离线时保留上次快照。" : "Task titles, daily usage and subagent relationships sync via Cloudflare, without messages or project paths. Identity combines device and task IDs; subagents fold only within one device. Peers need to upgrade and upload task details; offline snapshots remain available."}</p>}
           {view === "tasks" && projects?.peerTasks?.some(peer => peer.partial) && <p>{zh ? "部分设备任务快照不完整，当前只计已接收明细。" : "Some peer task snapshots are partial; only received details are counted."}</p>}
           {view === "projects" && <p>{zh ? "项目按本机工作目录归属，Git worktree 合并至主仓库。成本使用本地价格表；价格或上下文无法确认时不估算。" : "Projects follow local working directories; Git worktrees share their main repository. Costs use a local catalog and remain unavailable when rates or context are unknown."}</p>}
           {(view === "tasks" || view === "projects") && projects && <p>{zh ? `已扫描 ${projects.scannedFiles} 份本机记录；缺失、超长或计数重置的记录可能无法完整归属。` : `${projects.scannedFiles} local files scanned; missing, oversized or reset-counter records may not be fully attributed.`}{projects.pricingUpdatedAt ? ` ${zh ? "价格表时间" : "Catalog date"}: ${projects.pricingUpdatedAt}` : ""}</p>}

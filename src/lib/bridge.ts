@@ -459,7 +459,8 @@ export function openControlCenterWindow(): Promise<void> {
   });
 }
 
-export function setControlCenterCalendarOpen(open: boolean): Promise<void> {
+/** Resize the control center: `open` for the calendar side panel, `wide` for the side-by-side usage page. */
+export function setControlCenterCalendarOpen(open: boolean, wide = false): Promise<void> {
   if (!isTauri() || !controlCenterOwnsWindow) return Promise.resolve();
   const intent = widgetIntent;
   return enqueueWidgetTransition(async () => {
@@ -467,7 +468,7 @@ export function setControlCenterCalendarOpen(open: boolean): Promise<void> {
     const { invoke } = await import("@tauri-apps/api/core");
     const workArea = widgetAnchorWorkArea ?? await readCurrentWorkArea();
     if (intent !== widgetIntent || !controlCenterOwnsWindow) return;
-    await invoke("set_control_center_calendar_open", { open, workArea });
+    await invoke("set_control_center_calendar_open", { open, wide, workArea });
   });
 }
 

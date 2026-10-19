@@ -11,9 +11,15 @@ export function colorbarSample(position: number): string {
   return `#${PALETTE[left].map((value, channel) => Math.round(value + (PALETTE[right][channel] - value) * (x - left)).toString(16).padStart(2, "0")).join("")}`;
 }
 
+const CLAUDE_TIERS: Record<string, number> = { mythos: 4, fable: 3, opus: 2, sonnet: 1, haiku: 0 };
+
 function generation(model: Pick<ModelUsage, "id" | "name">): number[] | null {
-  const match = `${model.id} ${model.name}`.match(/(?:^|[/:\s])gpt[-\s]?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
-  return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
+  const text = `${model.id} ${model.name}`;
+  const match = text.match(/(?:^|[/:\s])gpt[-\s]?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
+  if (match) return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+  // Claude: newer versions first, then the larger tier within a version.
+  const claude = text.match(/claude-(mythos|fable|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/i);
+  return claude ? [Number(claude[2]), Number(claude[3] ?? 0), CLAUDE_TIERS[claude[1].toLowerCase()]] : null;
 }
 
 /** Numeric GPT generation, not usage rank, strength or inferred release dates. Same-generation names break ties. */

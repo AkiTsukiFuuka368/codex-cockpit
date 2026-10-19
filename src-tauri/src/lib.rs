@@ -64,6 +64,9 @@ const EXPANDED_LOGICAL_WIDTH: f64 = 520.0;
 const EXPANDED_LOGICAL_HEIGHT: f64 = 640.0;
 const CONTROL_CENTER_LOGICAL_WIDTH: f64 = 560.0;
 const CONTROL_CENTER_CALENDAR_LOGICAL_WIDTH: f64 = 940.0;
+/// Usage page with Codex and Claude side by side.
+const CONTROL_CENTER_DUAL_LOGICAL_WIDTH: f64 = 1_120.0;
+const CONTROL_CENTER_DUAL_CALENDAR_LOGICAL_WIDTH: f64 = 1_500.0;
 const CONTROL_CENTER_LOGICAL_HEIGHT: f64 = 600.0;
 const MIN_EXPANDED_LOGICAL_HEIGHT: f64 = 160.0;
 const MAX_EXPANDED_LOGICAL_HEIGHT: f64 = 1_200.0;
@@ -1649,6 +1652,7 @@ fn open_control_center(
 #[tauri::command(async)]
 fn set_control_center_calendar_open(
     open: bool,
+    wide: Option<bool>,
     work_area: Option<WorkAreaPayload>,
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1695,10 +1699,11 @@ fn set_control_center_calendar_open(
         });
     let mut size = PhysicalSize::new(
         widget_window_size(
-            if open {
-                CONTROL_CENTER_CALENDAR_LOGICAL_WIDTH
-            } else {
-                CONTROL_CENTER_LOGICAL_WIDTH
+            match (open, wide.unwrap_or(false)) {
+                (false, false) => CONTROL_CENTER_LOGICAL_WIDTH,
+                (true, false) => CONTROL_CENTER_CALENDAR_LOGICAL_WIDTH,
+                (false, true) => CONTROL_CENTER_DUAL_LOGICAL_WIDTH,
+                (true, true) => CONTROL_CENTER_DUAL_CALENDAR_LOGICAL_WIDTH,
             },
             scale_factor,
             safe_inset,
@@ -3192,7 +3197,9 @@ pub fn run() {
             create_automatic_backup,
             restore_latest_backup,
             get_app_diagnostics,
-            claude::get_claude_usage,
+            claude::get_claude_setup,
+            claude::get_claude_tokei_usage,
+            claude::get_claude_project_usage,
             claude::install_claude_collector
         ])
         .on_tray_icon_event(|app, event| {

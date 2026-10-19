@@ -3789,15 +3789,27 @@ textarea {
 .local-usage-actions button:focus-visible { outline: 2px solid var(--glass-accent, #7b9fff); outline-offset: 2px; }
 .local-usage-consent { padding: 10px; border: 1px solid var(--glass-edge); border-radius: 10px; }
 
-/* Claude usage page */
-.claude-usage-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.claude-daily { display: grid; gap: 6px; padding: 12px 3px 4px; }
-.claude-daily-title { color: var(--glass-muted, #9babbc); font-size: calc(9px * var(--ui-font-scale, 1)); }
-.claude-daily-bars { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); align-items: end; gap: 3px; height: 44px; }
-.claude-daily-bars i { display: block; border-radius: 3px 3px 1px 1px; background: var(--glass-mint, #7b9fff); opacity: .65; min-height: 0; }
-.claude-collector { margin-top: 10px; }
-.claude-collector .usage-note { margin: 4px 0 0; }
-.claude-collector-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+/* Usage page: Codex and Claude side by side */
+.usage-dual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; min-width: 0; }
+.usage-column { display: grid; gap: 8px; min-width: 0; align-content: start; }
+.usage-column + .usage-column { padding-left: 18px; border-left: 1px solid rgba(123, 159, 255, .12); }
+.usage-column-header { display: flex; align-items: center; gap: 8px; padding: 2px 3px 4px; }
+.usage-column-header strong { font-size: calc(12px * var(--ui-font-scale, 1)); font-weight: 700; letter-spacing: .02em; }
+.usage-column-header .provider-mark { width: 22px; height: 22px; margin: 0; padding: 3px; border-radius: 7px; }
+.usage-source-claude .usage-toolbar { grid-template-columns: minmax(0, 1.3fr) minmax(0, .9fr) minmax(0, 1fr) auto; }
+.codex-focus-card.quota-card--overlay-open .control-center--minimal.control-center--dual.control-center--calendar-open {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+}
+@media (max-width: 900px) {
+  .usage-dual { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .usage-column + .usage-column { padding-left: 0; padding-top: 18px; border-left: 0; border-top: 1px solid rgba(123, 159, 255, .12); }
+}
+.claude-extras { display: grid; gap: 8px; padding: 10px 3px 0; border-top: 1px solid rgba(123, 159, 255, .1); text-align: left; font-size: calc(9px * var(--ui-font-scale, 1)); }
+.claude-extras .usage-explanation > summary { font-weight: 600; font-size: calc(10px * var(--ui-font-scale, 1)); }
+.claude-extras .usage-explanation > div { color: var(--glass-muted, #9babbc); }
+.claude-extras .usage-text-button { justify-self: start; }
+.claude-extras .usage-explanation > summary small { color: var(--glass-muted, #9babbc); font-weight: 400; }
+.claude-extras .usage-explanation > div > p { margin: 6px 0; }
 .claude-wrapper-command { display: block; margin: 6px 0; padding: 8px; border-radius: 6px; background: rgba(123, 159, 255, .07); font-size: calc(8px * var(--ui-font-scale, 1)); word-break: break-all; user-select: text; }
 .claude-price-table { width: 100%; border-collapse: collapse; font-size: calc(8px * var(--ui-font-scale, 1)); font-variant-numeric: tabular-nums; }
 .claude-price-table th, .claude-price-table td { padding: 4px 3px; text-align: right; border-bottom: 1px solid rgba(123, 159, 255, .08); white-space: nowrap; }

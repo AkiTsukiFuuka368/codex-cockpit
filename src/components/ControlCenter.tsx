@@ -1,5 +1,5 @@
 import { ArrowClockwise, ArrowSquareOut, GearSix, Monitor, Moon, Sun, X } from "@phosphor-icons/react";
-import { useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { personalFeedbackView } from "../lib/personComfort";
 import { UI_FONT_OPTIONS, normalizeFontFamily } from "../lib/fonts";
 import { personalizeComfortCurve } from "../lib/comfortFeedback";
@@ -11,8 +11,9 @@ import { PersonComfortSection } from "./PersonComfortSection";
 import type { TokeiUsage } from "../lib/tokeiUsage";
 import { RangeSlider } from "./RangeSlider";
 import { ResetRiskQuotaHeatmap } from "./ResetRiskQuotaHeatmap";
-import { CodexUsagePanel } from "./CodexUsagePanel";
-import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
+import { CodexUsagePanel, type UsageSource } from "./CodexUsagePanel";
+import { ClaudeSetupPanel } from "./ClaudeSetupPanel";
+import { ProviderMark } from "./ProviderMark";
 import { TeamMemberSettings } from "./TeamMemberSettings";
 import { CloudSyncSettings } from "./CloudSyncSettings";
 import { LocalUsageSourceSettings } from "./LocalUsageSourceSettings";
@@ -52,8 +53,9 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
     comfortFeedback.filter(record => (record.personId ?? null) === comfortPersonId)
       .map(record => personalFeedbackView(record, comfortUsage, dailyUsageHistory, dailyUsage)),
   ), [comfortFeedback, comfortPersonId, comfortUsage, dailyUsageHistory, dailyUsage]);
-  const [page, setPage] = useState<"quota" | "usage" | "claude" | "settings">("usage");
-  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [page, setPage] = useState<"quota" | "usage" | "settings">("usage");
+  const [calendarOwner, setCalendarOwner] = useState<UsageSource | null>(null);
+  const calendarOpen = calendarOwner !== null;
   const [calendarPortalTarget, setCalendarPortalTarget] = useState<HTMLElement | null>(null);
   const zh = language !== "en";
   const selectedPersonName = comfortUsage?.groups.find(group => group.id === comfortPersonId)?.name
@@ -118,12 +120,14 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
   const updatePreferences = (patch: Partial<WidgetPreferences>) => onPreferences({ ...preferences, ...patch });
   const fontNeedsLocalInstallation = UI_FONT_OPTIONS.find(option => option.id === preferences.fontFamily)?.localOnly === true;
   const productName = zh ? "Codex 驾驶舱" : "Codex Cockpit";
-  const changeCalendarOpen = (open: boolean) => {
-    setCalendarOpen(open);
-    void setControlCenterCalendarOpen(open).catch(() => undefined);
-  };
+  // One calendar at a time; the usage page is wide enough for both columns.
+  const changeCalendar = (owner: UsageSource) => (open: boolean) => setCalendarOwner(current => open ? owner : current === owner ? null : current);
+  const dual = page === "usage";
+  useEffect(() => {
+    void setControlCenterCalendarOpen(calendarOpen, dual).catch(() => undefined);
+  }, [calendarOpen, dual]);
   const changePage = (next: typeof page) => {
-    if (next !== "usage" && calendarOpen) changeCalendarOpen(false);
+    if (next !== "usage") setCalendarOwner(null);
     setPage(next);
   };
 
@@ -135,7 +139,7 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
   };
 
   return (
-    <section ref={dialogRef} className={`control-center control-center--minimal${page === "usage" && calendarOpen ? " control-center--calendar-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="control-center-title" tabIndex={-1} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
+    <section ref={dialogRef} className={`control-center control-center--minimal${dual ? " control-center--dual" : ""}${page === "usage" && calendarOpen ? " control-center--calendar-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="control-center-title" tabIndex={-1} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
       <header
         className="control-header control-header--draggable"
         onPointerDown={handleHeaderPointerDown}
@@ -148,10 +152,19 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
         <nav className="usage-page-tabs" aria-label={zh ? "控制中心页面" : "Control center pages"}>
           <button type="button" aria-pressed={page === "usage"} onClick={() => changePage("usage")}>{zh ? "用量" : "Usage"}</button>
           <button type="button" aria-pressed={page === "quota"} onClick={() => changePage("quota")}>{zh ? "额度" : "Quota"}</button>
-          <button type="button" aria-pressed={page === "claude"} onClick={() => changePage("claude")}>Claude</button>
           <button type="button" aria-pressed={page === "settings"} onClick={() => changePage("settings")}><GearSix aria-hidden="true" />{labels.settings}</button>
         </nav>
-        {page === "usage" ? <CodexUsagePanel zh={zh} initialUsage={comfortUsage} onOpenSettings={() => changePage("settings")} calendarOpen={calendarOpen} onCalendarOpenChange={changeCalendarOpen} calendarPortalTarget={calendarPortalTarget} /> : page === "claude" ? <ClaudeUsagePanel zh={zh} onQuotaChanged={onRefresh} /> : page === "settings" ? <div className="control-settings-page" aria-label={labels.settings}>
+        {page === "usage" ? <div className="usage-dual">
+          <section className="usage-column" aria-label="Codex">
+            <header className="usage-column-header"><ProviderMark provider="codex" label="Codex" /><strong>Codex</strong></header>
+            <CodexUsagePanel zh={zh} source="codex" initialUsage={comfortUsage} onOpenSettings={() => changePage("settings")} calendarOpen={calendarOwner === "codex"} onCalendarOpenChange={changeCalendar("codex")} calendarPortalTarget={calendarPortalTarget} />
+          </section>
+          <section className="usage-column" aria-label="Claude">
+            <header className="usage-column-header"><ProviderMark provider="claude" label="Claude" /><strong>Claude</strong></header>
+            <CodexUsagePanel zh={zh} source="claude" calendarOpen={calendarOwner === "claude"} onCalendarOpenChange={changeCalendar("claude")} calendarPortalTarget={calendarPortalTarget} />
+            <ClaudeSetupPanel zh={zh} onQuotaChanged={onRefresh} />
+          </section>
+        </div> : page === "settings" ? <div className="control-settings-page" aria-label={labels.settings}>
         <section className="minimal-section" aria-labelledby="minimal-display-title">
           <header className="minimal-section-header"><strong id="minimal-display-title">{labels.display}</strong></header>
           <div className="minimal-font-field">
