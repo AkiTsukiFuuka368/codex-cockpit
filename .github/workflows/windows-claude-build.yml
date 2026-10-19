@@ -1,6 +1,8 @@
 name: Windows build (with Claude support)
-# Builds an unsigned Windows installer from this fork and publishes it as a
-# pre-release, so it can be downloaded without a Rust toolchain.
+# Builds the Windows installer from this fork and publishes it as a release.
+# With the TAURI_SIGNING_PRIVATE_KEY secret set, the build is also signed and
+# the in-app updater feed (updates-stable / updates-beta) is refreshed, so
+# installed copies update themselves.
 on:
   workflow_dispatch:
   push:
@@ -8,15 +10,16 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: windows-claude-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: windows-claude-build
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: windows-latest
     env:
-      # Point the in-app updater at this fork so it never swaps in an upstream build without Claude support.
+      # The in-app updater reads this fork's feed, never the upstream one.
       COCKPIT_UPDATES_REPOSITORY: ${{ github.repository }}
       VITE_RELEASE_URL: https://github.com/${{ github.repository }}/releases
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -30,23 +33,48 @@ jobs:
       - run: npm ci
       - run: npm test -- --maxWorkers=2
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Build installer
+      - name: Set build version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every build gets a higher version so the updater always sees it as new.
+          version="0.3.$((100 + GITHUB_RUN_NUMBER))"
+          node -e "const f='src-tauri/tauri.conf.json';const fs=require('fs');const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')" "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build signed installer
+        if: env.HAS_SIGNING_KEY == 'true'
+        run: npm run tauri build -- --bundles nsis --config src-tauri/tauri.fork.conf.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+      - name: Build installer (unsigned, no auto-update)
+        if: env.HAS_SIGNING_KEY != 'true'
         run: npm run tauri build -- --bundles nsis
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: windows-x64-installer
-          path: src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: error
-          retention-days: 30
-      - name: Publish pre-release
+      - name: Publish release and update feed
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="claude-build-${GITHUB_RUN_NUMBER}"
-          sha256sum src-tauri/target/release/bundle/nsis/*.exe > SHA256SUMS.txt
-          gh release create "$tag" src-tauri/target/release/bundle/nsis/*.exe SHA256SUMS.txt \
-            --target "$GITHUB_SHA" --prerelease \
-            --title "Codex Cockpit + Claude (build ${GITHUB_RUN_NUMBER})" \
-            --notes "Unsigned Windows installer built from ${GITHUB_SHA} on branch ${GITHUB_REF_NAME}. Adds a Claude quota card and a Claude usage page."
+          mkdir packages
+          for file in src-tauri/target/release/bundle/nsis/*.exe src-tauri/target/release/bundle/nsis/*.exe.sig; do
+            [ -e "$file" ] || continue
+            name="$(basename "$file")"
+            cp "$file" "packages/${name// /.}"
+          done
+          installer="$(ls packages/*-setup.exe)"
+          (cd packages && sha256sum *.exe > SHA256SUMS.txt)
+          tag="claude-v${VERSION}"
+          gh release create "$tag" packages/* --target "$GITHUB_SHA" \
+            --title "Codex Cockpit + Claude ${VERSION}" \
+            --notes "Windows installer built from ${GITHUB_SHA}. Adds Claude next to Codex."
+          if [ -e "${installer}.sig" ]; then
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$installer")"
+            node -e "const fs=require('fs');const [v,u,s]=process.argv.slice(1);fs.writeFileSync('latest.json',JSON.stringify({version:v,notes:'Codex Cockpit + Claude '+v,pub_date:new Date().toISOString(),platforms:{'windows-x86_64':{url:u,signature:fs.readFileSync(s,'utf8').trim()}}},null,2)+'\n')" "$VERSION" "$url" "${installer}.sig"
+            for channel in stable beta; do
+              gh release view "updates-$channel" >/dev/null 2>&1 || gh release create "updates-$channel" --prerelease --target "$GITHUB_SHA" --title "Update feed ($channel)" --notes "Machine-readable update feed for the in-app updater."
+              gh release upload "updates-$channel" latest.json --clobber
+            done
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set: installer published, but installed apps will not update themselves."
+          fi

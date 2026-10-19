@@ -392,6 +392,10 @@ impl Pricing {
             ("openai/gpt-5.6-sol", 4.0, 0.40, 20.0),
             ("openai/gpt-5.6-terra", 2.0, 0.20, 12.0),
             ("openai/gpt-5.6-luna", 0.20, 0.02, 1.20),
+            // Codex Auto-review checks: OpenAI states they are free and do not
+            // count toward plan usage, and publishes no API rate for this id.
+            // A local or shared catalog entry still overrides this.
+            ("openai/codex-auto-review", 0.0, 0.0, 0.0),
         ] {
             let bare_id = id.strip_prefix("openai/").unwrap_or(id);
             if self.models.contains_key(bare_id)
@@ -560,9 +564,13 @@ impl Pricing {
             valid(rate.cache_read)?,
         );
         // Only an exact per-event increment identifies the high-context tier.
-        // Aggregated/missing context counts cannot safely be charged at base rate.
-        let context = last.filter(|v| v.valid() && *v == delta)?;
-        let high = context.input_tokens > 272_000;
+        // Aggregated increments (resumed or forked sessions, missing per-event
+        // counts) are estimated at the standard tier. That is exact whenever the
+        // increment's input is at most 272K (no single request in it can exceed
+        // the threshold) and a lower bound otherwise.
+        let high = last
+            .filter(|v| v.valid() && *v == delta)
+            .is_some_and(|context| context.input_tokens > 272_000);
         Some(
             ((delta.input_tokens - delta.cached_input_tokens) as f64
                 * input
@@ -2684,7 +2692,7 @@ mod tests {
         );
     }
     #[test]
-    fn exact_local_rates_require_context_and_never_guess() {
+    fn exact_local_rates_use_context_for_the_high_tier() {
         let mut pricing = Pricing::default();
         pricing.models.insert(
             "openai/model-test".into(),
@@ -2710,7 +2718,10 @@ mod tests {
                 < 1e-10
         );
         assert!(pricing.estimate("missing", counts, Some(counts)).is_none());
-        assert!(pricing.estimate("model-test", counts, None).is_none());
+        assert_eq!(
+            pricing.estimate("model-test", counts, None),
+            pricing.estimate("model-test", counts, Some(counts))
+        );
         let high = Counts {
             input_tokens: 300_000,
             ..counts
@@ -2765,7 +2776,15 @@ mod tests {
                 < 1e-10
         );
         assert!(pricing.estimate("gpt-6", counts, Some(counts)).is_none());
-        assert!(pricing.estimate("gpt-6-luna", counts, None).is_none());
+        assert!(
+            (pricing.estimate("gpt-6-luna", counts, None).unwrap()
+                - pricing
+                    .estimate("gpt-6-luna", counts, Some(counts))
+                    .unwrap())
+            .abs()
+                < 1e-12,
+            "aggregated increments use the standard tier"
+        );
         let high = Counts {
             input_tokens: 300_000,
             ..counts
@@ -2967,9 +2986,9 @@ mod tests {
         let context =
             r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","cwd":"/synthetic/repo"}}"#;
         let no_context = run_with_pricing(&[context, FIRST], pricing.clone());
-        assert!(no_context.warnings.contains("cost_context_unavailable"));
+        assert!(!no_context.warnings.contains("cost_context_unavailable"));
         assert!(!no_context.warnings.contains("missing_model_price"));
-        for collected in [unknown, no_context] {
+        for collected in [unknown] {
             let day = collected
                 .projects
                 .values()
@@ -3028,8 +3047,12 @@ mod tests {
         assert!(
             (pricing.estimate("gpt-6.1-sol", long, Some(long)).unwrap() - 1.198004).abs() < 1e-10
         );
-        assert!(pricing.estimate("gpt-6.1-sol", long, None).is_none());
-        assert!(pricing.estimate("gpt-6.1-sol", long, Some(base)).is_none());
+        // Without an exact per-request count the standard tier is used (a lower bound).
+        let standard = (222_001.0 * 2.0 + 50_000.0 * 0.10 + 20_000.0 * 10.0) / 1e6;
+        assert!((pricing.estimate("gpt-6.1-sol", long, None).unwrap() - standard).abs() < 1e-10);
+        assert!(
+            (pricing.estimate("gpt-6.1-sol", long, Some(base)).unwrap() - standard).abs() < 1e-10
+        );
         fs::remove_dir_all(home).unwrap();
     }
     #[test]

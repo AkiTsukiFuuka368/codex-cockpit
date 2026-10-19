@@ -25,3 +25,12 @@ Get-Content task.md -Raw | powershell -NoProfile -ExecutionPolicy Bypass -File "
 ## 金额说明
 
 价格按 Anthropic 官方 API 价格页（2026-10-18 核对）内置，包含缓存写入（5 分钟 / 1 小时）和缓存读取单价，Haiku 5.5 按单次请求是否超过 10 万 Token 区分档位。订阅用户不会按这个扣费，只作参考。价格表里没有的模型不计入金额。
+
+## 自动更新
+
+这个分支的安装包会从本仓库自己的更新源（`updates-stable` / `updates-beta` 发布中的 `latest.json`）检查更新，不会连到原作者的仓库。每次推送到 `claude-support` 分支，GitHub Actions 会编译、签名并刷新更新源，已安装的驾驶舱会在「设置 → 应用更新」里自动下载新版，确认后重启安装。签名需要仓库里有 `TAURI_SIGNING_PRIVATE_KEY` 这个 Actions 密钥；没有时仍会出安装包，但不能自动更新。
+
+## Codex 计价补充
+
+- `codex-auto-review`（自动审查子任务）按 $0 计：OpenAI 说明自动审查免费、不计入套餐用量，也没有公开的 API 单价。需要的话可在自定义价格表里覆盖。
+- 续接或分叉的会话里，一次性累加的用量无法按单次请求判断是否超过 272K 长上下文档，现在按标准档估算（增量不超过 272K 时与精确值相同，超过时是下限），不再显示为“成本不全”。
