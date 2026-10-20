@@ -49,7 +49,7 @@ export function ClaudeSetupPanel({ zh, onQuotaChanged = () => undefined }: { zh:
   };
 
   return <div className="claude-extras">
-    <details className="usage-explanation claude-collector" open={!collector.statuslineInstalled && setup.available}>
+    <details className="usage-explanation claude-collector" open={!collector.statuslineInstalled}>
       <summary>{zh ? "订阅额度采集" : "Subscription quota"}{collector.statuslineInstalled ? <small>{lastObserved ? (zh ? ` · 最近采集 ${lastObserved}` : ` · last ${lastObserved}`) : (zh ? " · 已配置" : " · configured")}</small> : <small>{zh ? " · 未配置" : " · not set up"}</small>}</summary>
       <div>
         <p>{collector.statuslineInstalled
@@ -57,9 +57,9 @@ export function ClaudeSetupPanel({ zh, onQuotaChanged = () => undefined }: { zh:
           : collector.statuslineConflict
             ? (zh ? "Claude Code 已有你自己的状态栏，没有改动它。可以替换（会先备份 settings.json）。" : "Claude Code already has your own status line. You can replace it; settings.json is backed up first.")
             : !setup.available
-              ? (zh ? "这台电脑上还没有 Claude Code 的数据目录（~/.claude）。" : "No Claude Code folder (~/.claude) on this computer yet.")
+              ? (zh ? "这台电脑上还没有 Claude Code 的数据目录（~/.claude）。一键配置会创建它并写入脚本，之后 Claude Code 第一次运行就会开始记录。" : "No Claude Code folder (~/.claude) yet. Setup creates it and writes the scripts; recording starts with the first Claude Code run.")
               : (zh ? "5 小时和每周额度由 Claude Code 自己交给状态栏脚本。配置后驾驶舱只读取它记下的数字，不读取登录凭证。" : "Claude Code reports the 5-hour and weekly windows to status line scripts. The cockpit only reads the recorded numbers, never your credentials.")}</p>
-        {isTauri() && setup.available && <button type="button" className="usage-text-button" disabled={installing} onClick={() => void install(collector.statuslineConflict && !collector.statuslineInstalled)}>
+        {isTauri() && <button type="button" className="usage-text-button" disabled={installing} onClick={() => void install(collector.statuslineConflict && !collector.statuslineInstalled)}>
           {installing ? (zh ? "配置中…" : "Configuring…") : collector.statuslineInstalled ? (zh ? "重新写入脚本" : "Rewrite scripts") : collector.statuslineConflict ? (zh ? "替换状态栏并配置" : "Replace and configure") : (zh ? "一键配置" : "Set up")}
         </button>}
         {message && <p className="usage-note" role="status">{message}</p>}
