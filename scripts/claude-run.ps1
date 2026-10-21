@@ -7,25 +7,44 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 
+# This script lives in <owner home>\.claude\cockpit. Sandboxed callers (such as
+# Codex's Windows sandbox) run as a different Windows user, so $HOME and the
+# user environment are not the owner's: derive the owner's paths from here.
+$cockpitDir = $PSScriptRoot
+$ownerHome = Split-Path (Split-Path $cockpitDir -Parent) -Parent
+
 if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
   $token = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', 'User')
+  if (-not $token) {
+    # Fallback for sandboxed callers: a token file next to this script.
+    $tokenFile = Join-Path $cockpitDir 'oauth-token'
+    if (Test-Path -LiteralPath $tokenFile) {
+      try { $token = (Get-Content -LiteralPath $tokenFile -Raw -ErrorAction Stop) -replace '\s', '' } catch { $token = $null }
+    }
+  }
   if ($token) { $env:CLAUDE_CODE_OAUTH_TOKEN = $token }
+}
+if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
+  [Console]::Error.WriteLine("claude-run: no login token found (CLAUDE_CODE_OAUTH_TOKEN is not set for this Windows user and $cockpitDir\oauth-token is missing or unreadable).")
 }
 
 function Find-Claude {
   $cmd = Get-Command claude.exe -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $cmd) { $cmd = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
   if ($cmd) { return $cmd.Source }
-  $local = Join-Path $HOME '.local\bin\claude.exe'
-  if (Test-Path -LiteralPath $local) { return $local }
+  foreach ($homeDir in @($ownerHome, $HOME) | Select-Object -Unique) {
+    $local = Join-Path $homeDir '.local\bin\claude.exe'
+    if (Test-Path -LiteralPath $local) { return $local }
+  }
   $roots = @()
-  $packages = Join-Path $env:LOCALAPPDATA 'Packages'
-  if (Test-Path -LiteralPath $packages) {
-    Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
-      $roots += (Join-Path $_.FullName 'LocalCache\Roaming\Claude\claude-code')
+  foreach ($packages in @((Join-Path $ownerHome 'AppData\Local\Packages'), (Join-Path $env:LOCALAPPDATA 'Packages')) | Select-Object -Unique) {
+    if (Test-Path -LiteralPath $packages) {
+      Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+        $roots += (Join-Path $_.FullName 'LocalCache\Roaming\Claude\claude-code')
+      }
     }
   }
-  $roots += (Join-Path $env:APPDATA 'Claude\claude-code')
+  $roots += (Join-Path $ownerHome 'AppData\Roaming\Claude\claude-code')
   foreach ($root in $roots) {
     if (Test-Path -LiteralPath $root) {
       $exe = Get-ChildItem -LiteralPath $root -Recurse -Filter claude.exe -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -35,8 +54,7 @@ function Find-Claude {
   throw 'claude.exe was not found. Install Claude Code or the Claude desktop app.'
 }
 
-$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
-$dir = Join-Path $base 'cockpit'
+$dir = $cockpitDir
 $file = Join-Path $dir 'rate-limits.json'
 
 function Save-RateLimit($info) {
@@ -85,6 +103,10 @@ $handle = {
   elseif ($evt.type -eq 'result') {
     $script:resultText = $evt.result
     if ($evt.is_error) { $script:isError = $true }
+    $text = [string]$evt.result
+    if ($text -match 'ENOTFOUND|EAI_AGAIN|getaddrinfo|ECONNREFUSED|ETIMEDOUT|Unable to connect') {
+      [Console]::Error.WriteLine('claude-run: network error (DNS or connection). If this runs in a sandbox without network access, run it with network access or outside the sandbox.')
+    }
   }
 }
 $ErrorActionPreference = 'Continue'
