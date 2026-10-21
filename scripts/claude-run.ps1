@@ -15,17 +15,10 @@ $ownerHome = Split-Path (Split-Path $cockpitDir -Parent) -Parent
 
 if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
   $token = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', 'User')
-  if (-not $token) {
-    # Fallback for sandboxed callers: a token file next to this script.
-    $tokenFile = Join-Path $cockpitDir 'oauth-token'
-    if (Test-Path -LiteralPath $tokenFile) {
-      try { $token = (Get-Content -LiteralPath $tokenFile -Raw -ErrorAction Stop) -replace '\s', '' } catch { $token = $null }
-    }
-  }
   if ($token) { $env:CLAUDE_CODE_OAUTH_TOKEN = $token }
 }
 if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
-  [Console]::Error.WriteLine("claude-run: no login token found (CLAUDE_CODE_OAUTH_TOKEN is not set for this Windows user and $cockpitDir\oauth-token is missing or unreadable).")
+  [Console]::Error.WriteLine("claude-run: no login token found: CLAUDE_CODE_OAUTH_TOKEN is not set for this Windows user. If this runs in a sandbox, run it outside the sandbox.")
 }
 
 function Find-Claude {
