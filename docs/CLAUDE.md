@@ -7,7 +7,7 @@
 
 ## 数据从哪里来
 
-**Token 用量**：读取 Claude Code 在本机写下的会话记录 `~/.claude/projects/**/*.jsonl`（设置了 `CLAUDE_CONFIG_DIR` 时读那个目录）。读取用量数字、模型名、时间和项目文件夹名；任务标题取会话标题，没有时取第一条提问的开头，只在本机显示，不保存、不上传。网页版和 App 里的普通聊天不在本机留记录，统计不到。
+**Token 用量**：读取 Claude Code 在本机写下的会话记录 `~/.claude/projects/**/*.jsonl`（设置了 `CLAUDE_CONFIG_DIR` 时读那个目录），以及 Claude 桌面端数据目录（`%APPDATA%\Claude`，商店版在 `Packages\Claude_*\LocalCache\Roaming\Claude`）里找到的其他 `.claude\projects`（桌面端 Code、Cowork 会话）。同一条消息出现在多个目录时只计一次。读取用量数字、模型名、时间和项目文件夹名；任务标题取会话标题，没有时取第一条提问的开头，只在本机显示，不保存、不上传。以下用量不在本机留记录，统计不到，但会消耗同一份订阅额度：claude.ai 网页和手机 App 的聊天；在云端运行的 Claude 会话（claude.ai 里让 Claude 动手做的任务、定时任务、网页版 Claude Code）；其他电脑。Claude 栏下方「统计范围」列出读取的目录，并把最近一次额度读数和同一窗口内的本机用量放在一起，方便看差多少。
 
 **订阅额度**：不使用你的登录凭证去请求任何接口。Claude Code 自己会把 5 小时和每周额度交给状态栏脚本（`rate_limits` 字段）。在 Claude 页点「一键配置」后：
 
@@ -20,7 +20,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\cockpit\claud
 Get-Content task.md -Raw | powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\cockpit\claude-run.ps1" --stdin
 ```
 
-额度只在 Claude Code 发出请求时更新。卡片上的时间是最近一次采集时间；窗口过了重置时间会自动显示为 100%。
+额度百分比只在交互式 Claude Code 发出请求时更新（状态栏脚本拿到 `rate_limits`）。`claude -p` 的 `rate_limit_event` 在正常（`allowed`）状态下不带 `utilization`，只有警告（`allowed_warning`）或被限流（`rejected`）时才带，所以只用 claude-run.ps1 时卡片基本不会更新。卡片上的时间是最近一次采集时间；窗口过了重置时间会自动显示为 100%。
 
 ## 金额说明
 

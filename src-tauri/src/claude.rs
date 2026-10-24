@@ -533,6 +533,8 @@ pub fn fetch_snapshot() -> Option<ProviderSnapshot> {
 #[derive(Clone, Debug)]
 struct Record {
     date: Arc<str>,
+    /// Request time, epoch seconds.
+    ts: i64,
     model: Arc<str>,
     project: Arc<str>,
     /// Task (session or subagent) this request belongs to.
@@ -576,7 +578,7 @@ impl Interner {
 
 #[derive(Default)]
 struct UsageCache {
-    root: Option<PathBuf>,
+    roots: Vec<PathBuf>,
     files: HashMap<PathBuf, FileState>,
     strings: Interner,
 }
@@ -703,11 +705,9 @@ fn parse_line(
         return None;
     }
     let timestamp = line.get("timestamp").and_then(Value::as_str)?;
-    let date = DateTime::parse_from_rfc3339(timestamp)
-        .ok()?
-        .with_timezone(&Local)
-        .format("%Y-%m-%d")
-        .to_string();
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let ts = parsed.timestamp();
+    let date = parsed.with_timezone(&Local).format("%Y-%m-%d").to_string();
     let creation_total = u64_at(usage, "cache_creation_input_tokens");
     let (cw5, cw1h) = match usage.get("cache_creation") {
         Some(split) => {
@@ -742,6 +742,7 @@ fn parse_line(
         key,
         Record {
             date: strings.get(&date),
+            ts,
             model: strings.get(model),
             project: strings.get(&project_name(&line, fallback_project)),
             task: strings.get(task),
@@ -961,56 +962,243 @@ struct ScanResult {
     files: usize,
     records: Vec<Record>,
     tasks: Vec<TaskMeta>,
+    sources: Vec<SourceInfo>,
 }
 
-fn scan(base: &Path) -> ScanResult {
-    let root = base.join("projects");
+/// One folder of Claude Code transcripts (`<config>/projects`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscriptRoot {
+    pub path: PathBuf,
+    /// `cli` (Claude Code's own folder), `desktop` (Claude desktop app) or `cowork`.
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInfo {
+    pub path: String,
+    pub kind: String,
+    pub files: usize,
+    pub records: usize,
+}
+
+const MAX_DISCOVERY_DEPTH: usize = 7;
+const MAX_EXTRA_ROOTS: usize = 200;
+/// Folders inside the desktop app's data that never hold transcripts.
+const SKIP_DIRS: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "IndexedDB",
+    "Local Storage",
+    "Session Storage",
+    "blob_storage",
+    "Service Worker",
+    "Crashpad",
+    "logs",
+    "node_modules",
+    "vm_bundles",
+    "claude-code",
+    "Partitions",
+    "WebStorage",
+    "shared_proto_db",
+    "VideoDecodeStats",
+];
+
+/// Folders the Claude desktop app keeps its own data in (Code tab, Cowork).
+fn desktop_data_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(config) = dirs::config_dir() {
+        out.push(config.join("Claude"));
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        // Microsoft Store (MSIX) installs keep AppData\Roaming inside the package.
+        if let Ok(entries) = fs::read_dir(local.join("Packages")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("Claude_") {
+                    out.push(
+                        entry
+                            .path()
+                            .join("LocalCache")
+                            .join("Roaming")
+                            .join("Claude"),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `.claude/projects` folders under `base`, a few levels deep.
+fn find_project_dirs(base: &Path, out: &mut Vec<PathBuf>) {
+    let mut stack = vec![(base.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_EXTRA_ROOTS {
+                return;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if name == "projects" && dir.file_name().is_some_and(|parent| parent == ".claude") {
+                out.push(path);
+                continue;
+            }
+            if depth < MAX_DISCOVERY_DEPTH && !SKIP_DIRS.contains(&name.as_str()) {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+}
+
+fn root_kind(path: &Path) -> &'static str {
+    let text = path.to_string_lossy().to_lowercase();
+    if text.contains("local-agent-mode") || text.contains("cowork") {
+        "cowork"
+    } else {
+        "desktop"
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Every transcript folder on this computer: Claude Code's own first, then any the
+/// desktop app keeps (its Code tab and Cowork sessions can use their own config folder).
+fn roots_from(cli_base: Option<&Path>, desktop_dirs: &[PathBuf]) -> Vec<TranscriptRoot> {
+    let mut roots: Vec<TranscriptRoot> = Vec::new();
+    if let Some(base) = cli_base {
+        roots.push(TranscriptRoot {
+            path: base.join("projects"),
+            kind: "cli",
+        });
+    }
+    let mut found = Vec::new();
+    for dir in desktop_dirs {
+        find_project_dirs(dir, &mut found);
+    }
+    found.sort();
+    for path in found {
+        if roots.iter().any(|root| same_dir(&root.path, &path)) {
+            continue;
+        }
+        let kind = root_kind(&path);
+        roots.push(TranscriptRoot { path, kind });
+    }
+    roots
+}
+
+/// Looking through the desktop app's folders is slower than reading transcripts,
+/// so the folder list is reused for a few minutes.
+static ROOTS: Mutex<Option<(std::time::Instant, Vec<TranscriptRoot>)>> = Mutex::new(None);
+const ROOTS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub fn transcript_roots() -> Vec<TranscriptRoot> {
+    let mut guard = match ROOTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((at, roots)) = guard.as_ref() {
+        if at.elapsed() < ROOTS_TTL {
+            return roots.clone();
+        }
+    }
+    let roots = roots_from(claude_base().as_deref(), &desktop_data_dirs());
+    *guard = Some((std::time::Instant::now(), roots.clone()));
+    roots
+}
+
+fn scan(roots: &[TranscriptRoot]) -> ScanResult {
     let mut guard = match CACHE.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     let cache = guard.get_or_insert_with(UsageCache::default);
-    if cache.root.as_deref() != Some(root.as_path()) {
+    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+    if cache.roots != root_paths {
         *cache = UsageCache {
-            root: Some(root.clone()),
+            roots: root_paths,
             ..UsageCache::default()
         };
     }
-    let mut files = Vec::new();
-    collect_files(&root, &mut files);
-    let present: std::collections::HashSet<&PathBuf> = files.iter().collect();
+    let mut per_root: Vec<Vec<PathBuf>> = Vec::new();
+    let mut total_files = 0usize;
+    for root in roots {
+        let mut files = Vec::new();
+        collect_files(&root.path, &mut files);
+        total_files += files.len();
+        per_root.push(files);
+    }
+    let present: std::collections::HashSet<&PathBuf> = per_root.iter().flatten().collect();
     cache.files.retain(|path, _| present.contains(path));
     let UsageCache {
         files: states,
         strings,
         ..
     } = cache;
-    for path in &files {
-        let state = states.entry(path.clone()).or_default();
-        refresh_file(&root, path, state, strings);
+    for (root, files) in roots.iter().zip(&per_root) {
+        for path in files {
+            let state = states.entry(path.clone()).or_default();
+            refresh_file(&root.path, path, state, strings);
+        }
     }
-    // The same message can appear in several files (resumed or forked sessions):
-    // count it once, in the file that first recorded it (the oldest session).
+    // The same message can appear in several files (resumed or forked sessions, or the
+    // same session seen from two folders): count it once, in the oldest file.
     let mut ordered: Vec<(&PathBuf, &FileState)> = states.iter().collect();
     ordered.sort_by(|a, b| a.1.modified.cmp(&b.1.modified).then(a.0.cmp(b.0)));
-    let mut merged: HashMap<&String, &Record> = HashMap::new();
-    for (_, state) in &ordered {
+    let mut merged: HashMap<&String, (&Record, &PathBuf)> = HashMap::new();
+    for (path, state) in &ordered {
         for (key, record) in &state.records {
             match merged.get(key) {
-                Some(existing) if existing.tokens.total() >= record.tokens.total() => {}
+                Some((existing, _)) if existing.tokens.total() >= record.tokens.total() => {}
                 _ => {
-                    merged.insert(key, record);
+                    merged.insert(key, (record, path));
                 }
             }
         }
     }
+    let sources = roots
+        .iter()
+        .zip(&per_root)
+        .map(|(root, files)| SourceInfo {
+            path: root.path.to_string_lossy().to_string(),
+            kind: root.kind.to_string(),
+            files: files.len(),
+            records: merged
+                .values()
+                .filter(|(_, path)| path.starts_with(&root.path))
+                .count(),
+        })
+        .collect();
     ScanResult {
-        files: files.len(),
-        records: merged.into_values().cloned().collect(),
+        files: total_files,
+        records: merged
+            .into_values()
+            .map(|(record, _)| record.clone())
+            .collect(),
         tasks: ordered
             .iter()
             .map(|(_, state)| state.meta.clone())
             .collect(),
+        sources,
     }
 }
 
@@ -1052,10 +1240,10 @@ fn task_name(meta: &TaskMeta, zh_fallback: bool) -> String {
 }
 
 /// Both payloads the Codex usage page reads, built from Claude Code transcripts.
-fn ledgers(base: Option<&Path>) -> (Value, Value) {
+fn ledgers(roots: &[TranscriptRoot]) -> (Value, Value) {
     let now = Utc::now().to_rfc3339();
     let device = device_id();
-    let Some(base) = base else {
+    if roots.is_empty() {
         let usage = serde_json::json!({
             "groups": [{ "id": CLAUDE_GROUP_ID, "name": device, "deviceIds": [device] }],
             "defaultGroupId": CLAUDE_GROUP_ID, "localGroupId": CLAUDE_GROUP_ID,
@@ -1069,8 +1257,8 @@ fn ledgers(base: Option<&Path>) -> (Value, Value) {
             "warnings": ["claude_directory_missing"],
         });
         return (usage, projects);
-    };
-    let result = scan(base);
+    }
+    let result = scan(roots);
     let mut device_ledger = DailyLedger::new();
     let mut project_ledgers: BTreeMap<Arc<str>, DailyLedger> = BTreeMap::new();
     let mut task_ledgers: HashMap<Arc<str>, DailyLedger> = HashMap::new();
@@ -1146,7 +1334,7 @@ fn ledgers(base: Option<&Path>) -> (Value, Value) {
         "deviceId": device, "updatedAt": now, "status": status, "coverage": "local",
         "scannedFiles": result.files, "pricingSource": "bundled-catalog", "pricingUpdatedAt": PRICING_UPDATED_AT,
         "taskMetadataCoverage": "complete", "projects": projects, "tasks": tasks, "peerTasks": [],
-        "warnings": warnings,
+        "warnings": warnings, "sources": result.sources,
     });
     (usage, projects)
 }
@@ -1158,7 +1346,7 @@ fn claude_base() -> Option<PathBuf> {
 /// Token ledger for the Claude usage page (same shape as `get_tokei_usage`).
 #[tauri::command]
 pub async fn get_claude_tokei_usage() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| ledgers(claude_base().as_deref()).0)
+    tokio::task::spawn_blocking(|| ledgers(&transcript_roots()).0)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())
 }
@@ -1166,7 +1354,7 @@ pub async fn get_claude_tokei_usage() -> Result<Value, String> {
 /// Projects and tasks for the Claude usage page (same shape as `get_codex_project_usage`).
 #[tauri::command]
 pub async fn get_claude_project_usage() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| ledgers(claude_base().as_deref()).1)
+    tokio::task::spawn_blocking(|| ledgers(&transcript_roots()).1)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())
 }
@@ -1206,6 +1394,83 @@ pub struct ClaudeSetup {
     pub prices: Vec<PriceRow>,
     pub price_source: String,
     pub collector: CollectorStatus,
+    /// Transcript folders found on this computer.
+    pub sources: Vec<SourceInfo>,
+    /// Last quota readings next to what this computer recorded in the same windows.
+    pub windows: Vec<WindowCheck>,
+}
+
+/// One quota window: the last reading, and local usage since the window began.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowCheck {
+    /// `fiveHour` or `sevenDay`.
+    pub window: String,
+    pub used_percent: f64,
+    pub observed_at: String,
+    pub window_start: String,
+    pub resets_at: String,
+    /// Local requests between the window start and the reading.
+    pub local_tokens: u64,
+    pub local_cost_usd: Option<f64>,
+    /// Local requests after the reading (not yet reflected in the percentage).
+    pub tokens_after_reading: u64,
+    pub cost_after_reading: Option<f64>,
+}
+
+#[derive(Default)]
+struct Tally {
+    tokens: u64,
+    cost: f64,
+    unpriced: bool,
+}
+
+impl Tally {
+    fn add(&mut self, record: &Record) {
+        self.tokens += record.tokens.total();
+        match request_cost(&record.model, &record.tokens) {
+            Some(cost) => self.cost += cost,
+            None => self.unpriced = true,
+        }
+    }
+    fn cost(&self) -> Option<f64> {
+        (!self.unpriced).then_some(self.cost)
+    }
+}
+
+fn window_check(
+    key: &str,
+    observation: Option<WindowObservation>,
+    window_seconds: i64,
+    records: &[Record],
+    now: i64,
+) -> Option<WindowCheck> {
+    let observation = observation?;
+    let resets_at = observation.resets_at?;
+    if resets_at <= now {
+        return None;
+    }
+    let start = resets_at - window_seconds;
+    let mut before = Tally::default();
+    let mut after = Tally::default();
+    for record in records.iter().filter(|record| record.ts >= start) {
+        if record.ts <= observation.observed_at {
+            before.add(record);
+        } else {
+            after.add(record);
+        }
+    }
+    Some(WindowCheck {
+        window: key.to_string(),
+        used_percent: observation.used_percent,
+        observed_at: rfc3339(observation.observed_at)?,
+        window_start: rfc3339(start)?,
+        resets_at: rfc3339(resets_at)?,
+        local_tokens: before.tokens,
+        local_cost_usd: before.cost(),
+        tokens_after_reading: after.tokens,
+        cost_after_reading: after.cost(),
+    })
 }
 
 fn settings_path(base: &Path) -> PathBuf {
@@ -1271,7 +1536,32 @@ fn collector_status(base: &Path) -> CollectorStatus {
 
 fn read_setup() -> ClaudeSetup {
     let base = claude_base();
+    let roots = transcript_roots();
+    let result = scan(&roots);
+    let now = Utc::now().timestamp();
+    let observation = base.as_deref().map(read_observation).unwrap_or_default();
+    let windows = [
+        window_check(
+            "fiveHour",
+            observation.five_hour,
+            5 * 3600,
+            &result.records,
+            now,
+        ),
+        window_check(
+            "sevenDay",
+            observation.seven_day,
+            7 * 24 * 3600,
+            &result.records,
+            now,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     ClaudeSetup {
+        sources: result.sources,
+        windows,
         available: base.is_some(),
         directory: config_dir().map(|path| path.to_string_lossy().to_string()),
         prices: price_rows(),
@@ -1557,12 +1847,13 @@ mod tests {
         )
         };
         fs::write(&file, entry("1")).unwrap();
-        assert_eq!(scan(&base).records.len(), 1);
+        let roots = roots_from(Some(&base), &[]);
+        assert_eq!(scan(&roots).records.len(), 1);
         let mut text = fs::read_to_string(&file).unwrap();
         text.push_str(&entry("2"));
         text.push_str("{\"partial\":"); // still being written
         fs::write(&file, text).unwrap();
-        let result = scan(&base);
+        let result = scan(&roots);
         assert_eq!(result.records.len(), 2);
         assert_eq!(result.files, 1);
         let _ = fs::remove_dir_all(&base);
@@ -1601,7 +1892,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let (usage_json, projects_json) = ledgers(Some(&base));
+        let (usage_json, projects_json) = ledgers(&roots_from(Some(&base), &[]));
         let device = &usage_json["devices"][0];
         let day = &device["daily"]["2026-10-18"];
         assert!(day.is_object(), "{usage_json}");
@@ -1643,7 +1934,7 @@ mod tests {
         assert!(tasks.iter().all(|t| t["id"] != "sess2"));
         let _ = fs::remove_dir_all(&base);
 
-        let (missing, _) = ledgers(None);
+        let (missing, _) = ledgers(&[]);
         assert_eq!(missing["status"], "unavailable");
     }
 
@@ -1743,5 +2034,85 @@ mod tests {
         fs::write(settings_path(&base), "{not json").unwrap();
         assert_eq!(install(&base, true).unwrap_err(), "claude_settings_invalid");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn finds_desktop_transcripts_and_counts_shared_messages_once() {
+        let base = temp_dir("roots-cli");
+        let app = temp_dir("roots-app");
+        let cli_project = base.join("projects").join("C--work");
+        let cowork_project = app
+            .join("local-agent-mode-sessions")
+            .join("acct")
+            .join("local_1")
+            .join(".claude")
+            .join("projects")
+            .join("-sessions-x");
+        let ignored = app.join("Cache").join(".claude").join("projects").join("p");
+        for dir in [&cli_project, &cowork_project, &ignored] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let entry = |id: &str| {
+            format!(
+            "{{\"type\":\"assistant\",\"requestId\":\"r{id}\",\"timestamp\":\"2026-10-18T03:00:00Z\",\"message\":{{\"id\":\"m{id}\",\"model\":\"claude-opus-5-5\",\"usage\":{{\"input_tokens\":1000,\"output_tokens\":100}}}}}}\n"
+        )
+        };
+        fs::write(cli_project.join("a.jsonl"), entry("1")).unwrap();
+        fs::write(
+            cowork_project.join("b.jsonl"),
+            format!("{}{}", entry("1"), entry("2")),
+        )
+        .unwrap();
+        fs::write(ignored.join("c.jsonl"), entry("3")).unwrap();
+        let roots = roots_from(Some(&base), &[app.clone()]);
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].kind, "cli");
+        assert_eq!(roots[1].kind, "cowork");
+        let result = scan(&roots);
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.sources.len(), 2);
+        assert_eq!(result.sources.iter().map(|s| s.records).sum::<usize>(), 2);
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn window_check_splits_local_usage_at_the_reading() {
+        let mut strings = Interner::default();
+        let mut record = |ts: i64| Record {
+            date: strings.get("2026-10-20"),
+            ts,
+            model: strings.get("claude-opus-5-5"),
+            project: strings.get("p"),
+            task: strings.get("t"),
+            tokens: Tokens {
+                input: 1_000_000,
+                ..Tokens::default()
+            },
+        };
+        let now = 1_000_000;
+        let reset = now + 3600;
+        let start = reset - 7 * 24 * 3600;
+        let records = vec![
+            record(start - 10),
+            record(start + 10),
+            record(now - 100),
+            record(now - 10),
+        ];
+        let observation = WindowObservation {
+            used_percent: 40.0,
+            resets_at: Some(reset),
+            observed_at: now - 50,
+        };
+        let check =
+            window_check("sevenDay", Some(observation), 7 * 24 * 3600, &records, now).unwrap();
+        assert_eq!(check.local_tokens, 2_000_000);
+        assert_eq!(check.tokens_after_reading, 1_000_000);
+        assert!((check.local_cost_usd.unwrap() - 8.0).abs() < 1e-9);
+        let expired = WindowObservation {
+            resets_at: Some(now - 1),
+            ..observation
+        };
+        assert!(window_check("sevenDay", Some(expired), 7 * 24 * 3600, &records, now).is_none());
     }
 }

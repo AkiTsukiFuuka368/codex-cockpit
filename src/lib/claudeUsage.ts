@@ -18,12 +18,36 @@ export interface ClaudeCollectorStatus {
   lastObservedAt: string | null;
 }
 
+/** A folder of Claude Code transcripts found on this computer. */
+export interface ClaudeSource {
+  path: string;
+  /** cli: Claude Code's own folder; desktop: Claude desktop app; cowork: Cowork sessions. */
+  kind: "cli" | "desktop" | "cowork" | string;
+  files: number;
+  records: number;
+}
+
+/** The last quota reading next to what this computer recorded in the same window. */
+export interface ClaudeWindowCheck {
+  window: "fiveHour" | "sevenDay" | string;
+  usedPercent: number;
+  observedAt: string;
+  windowStart: string;
+  resetsAt: string;
+  localTokens: number;
+  localCostUsd: number | null;
+  tokensAfterReading: number;
+  costAfterReading: number | null;
+}
+
 export interface ClaudeSetup {
   available: boolean;
   directory: string | null;
   prices: ClaudePriceRow[];
   priceSource: string;
   collector: ClaudeCollectorStatus;
+  sources: ClaudeSource[];
+  windows: ClaudeWindowCheck[];
 }
 
 export const CLAUDE_GROUP_ID = "claude-local";
@@ -69,7 +93,7 @@ export async function getClaudeProjectUsage(): Promise<ProjectUsageSnapshot> {
 
 export async function getClaudeSetup(): Promise<ClaudeSetup> {
   if (!isTauri()) {
-    return { available: true, directory: null, prices: [], priceSource: "sample", collector: { statuslineInstalled: false, statuslineConflict: false, wrapperPath: null, lastObservedAt: null } };
+    return { available: true, directory: null, prices: [], priceSource: "sample", collector: { statuslineInstalled: false, statuslineConflict: false, wrapperPath: null, lastObservedAt: null }, sources: [], windows: [] };
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<ClaudeSetup>("get_claude_setup");
