@@ -17,6 +17,7 @@ Token 来自本机 Codex 的用量记录；金额是拿这些记录按参考价�
 | 模型及官方来源 | 非缓存输入 | 缓存读取 | 输出 |
 | --- | ---: | ---: | ---: |
 | [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) | 2.00 | 0.10 | 10.00 |
+| [GPT-6.1 Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra)（2026-10-27 补充） | 1.00 | 0.05 | 5.00 |
 | [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) | 10.00 | 1.00 | 50.00 |
 | [GPT-6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) | 2.00 | 0.20 | 10.00 |
 | [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) | 0.10 | 0.01 | 0.50 |

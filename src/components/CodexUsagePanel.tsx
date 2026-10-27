@@ -11,6 +11,7 @@ import { UsageCalendar } from "./UsageCalendar";
 import { CustomTaskStatistics } from "./CustomTaskStatistics";
 import { DailyUsageTrend } from "./DailyUsageTrend";
 import { LocalUsageSourceSettings } from "./LocalUsageSourceSettings";
+import { DEEPSEEK_FLASH, deepseekFlashEquivalent } from "../lib/deepseekCompare";
 import { newestDevices, rangeLabel, tasksInRange, usageInRange, type UsageDateRange } from "../lib/usageCalendar";
 
 const PERIODS: readonly UsagePeriod[] = ["today", "7d", "30d", "all"];
@@ -168,6 +169,7 @@ export function CodexUsagePanel({ zh, source = "codex", initialUsage = null, onO
       : projects?.warnings.includes("no_usage_records")
         ? (claude ? (zh ? "还没有 Claude Code 用量记录。" : "No Claude Code usage recorded yet.") : (zh ? "当前目录没有可统计的记录，已保留上次缓存。" : "No usage records in the current folder; the previous cache is retained."))
         : (zh ? "本机记录刷新失败，当前显示上次缓存。" : "Local records could not be refreshed; showing the last cached usage.");
+  const deepseek = summary?.hasData ? deepseekFlashEquivalent(summary) : null;
   const scopeValue = (value: UsageMetrics | null) => metric === "cost" ? costLabel(value?.estimatedCostUsd ?? null, zh) : formatTokens(value?.totalTokens ?? 0, zh);
 
   if (!data) return <section className="codex-usage-panel"><p className={error ? "usage-error" : "usage-note"} role="status">{error ? (zh ? "暂时无法读取用量，请稍后重试。" : "Usage is unavailable. Try again shortly.") : (zh ? "正在读取用量…" : "Loading usage…")}</p>{error && !claude && <LocalUsageSourceSettings zh={zh} compact />}</section>;
@@ -204,6 +206,7 @@ export function CodexUsagePanel({ zh, source = "codex", initialUsage = null, onO
 
     {!group && !global ? <p className="usage-empty">{zh ? "选择一名组员，或到设置中分配设备。" : "Choose a member, or assign devices in settings."}</p> : <>
         <div className="usage-total">{!donut && <><span>{metric === "tokens" ? (zh ? "Token 用量" : "Token usage") : (zh ? "估算成本" : "Estimated cost")}</span><strong aria-label={totalCostUnavailable ? costLabel(null, zh) : undefined}>{summary?.hasData ? totalCostUnavailable ? "—" : metric === "cost" ? costLabel(chartTotal, zh) : formatTokens(summary.totalTokens, zh) : "—"}</strong></>}<small>{metric === "tokens" ? `${zh ? "估算成本" : "Estimated cost"} ${costLabel(summary?.estimatedCostUsd ?? null, zh)}` : `${totalCostUnavailable ? `${costLabel(null, zh)} · ` : ""}${(summary?.hasData ? formatTokens(summary.totalTokens, zh) : "—")} Tokens`}</small><button type="button" className="usage-text-button" onClick={toggleMetric}>{metric === "tokens" ? (zh ? "看成本" : "Costs") : (zh ? "看 Token" : "Tokens")}</button>{view === "tasks" && <small className="usage-inline-status">{[projects?.warnings.includes("scan_limit") ? (zh ? "补扫中" : "Scanning") : null, metric === "cost" && taskCostIncomplete ? (zh ? "成本不全" : "Partial cost") : null, taskReconciliation?.mismatch ? (zh ? "待对账" : "Ledger mismatch") : null].filter(Boolean).join(" · ")}</small>}</div>
+        {deepseek && <p className="usage-note usage-deepseek-compare" title={zh ? `DeepSeek V4.1 Flash：缓存命中 $${DEEPSEEK_FLASH.cacheHit}、未命中 $${DEEPSEEK_FLASH.cacheMiss}、输出 $${DEEPSEEK_FLASH.output} / 百万 Token（闲时），工作日高峰翻倍。${DEEPSEEK_FLASH.checkedAt} 核对。` : `DeepSeek V4.1 Flash: cache hit $${DEEPSEEK_FLASH.cacheHit}, miss $${DEEPSEEK_FLASH.cacheMiss}, output $${DEEPSEEK_FLASH.output} per million (off-peak); weekday peak doubles. Checked ${DEEPSEEK_FLASH.checkedAt}.`}>{zh ? "同样的 Token 按 DeepSeek V4.1 Flash 计" : "Same tokens at DeepSeek V4.1 Flash"}：{costLabel(deepseek.offPeakUsd, zh)}{zh ? "（闲时）～" : " off-peak – "}{costLabel(deepseek.peakUsd, zh)}{zh ? "（高峰）" : " peak"}</p>}
         <div className={donut ? "usage-model-today" : undefined}>
         {view === "tasks" && (summary?.hasData || rows.length > 0) && <UsageChart rows={rows} total={taskTotal} knownTotal={knownTotal} period={period} devices={[]} ids={[]} zh={zh} metric={metric} onToggle={toggleMetric} tasks colors={taskColors} />}
         {(view === "models" || view === "users") && summary?.hasData && <UsageChart rows={rows} total={chartTotal} knownTotal={metric === "cost" ? summary.knownCostUsd : undefined} period={period} devices={summary.devices} ids={colorIds} zh={zh} metric={metric} onToggle={toggleMetric} users={view === "users"} summaryOnly={summaryOnly} colors={modelColors} />}
@@ -237,6 +240,7 @@ export function CodexUsagePanel({ zh, source = "codex", initialUsage = null, onO
             ? `本机未归属 ${scopeValue(taskReconciliation.outstandingLocal)} · 其他设备 ${scopeValue(taskReconciliation.nonLocal)}`
             : `Unattributed local ${scopeValue(taskReconciliation.outstandingLocal)} · Other devices ${scopeValue(taskReconciliation.nonLocal)}`}</p>)}
           <p>{global ? (zh ? "全局按现有用户分组汇总，每台设备只计一次；未分组设备单列。" : "Global combines configured user groups, counting each device once; unassigned devices are separate.") : (zh ? `仅计所选分组的 ${sourceName} 用量。` : `Only ${sourceName} usage from this group.`)}{zh ? "Token 包含输入、缓存输入和输出，推理不重复累加。" : "Tokens include uncached input, cache and output; reasoning is not added twice."}</p>
+          <p>{zh ? "DeepSeek 对照只是假设：把同样的 Token（非缓存输入、缓存读取、输出）套用 DeepSeek V4.1 Flash 的官方单价，闲时价到工作日高峰价（翻倍）之间。两家分词方式不同，同样的内容在 DeepSeek 上的 Token 数会有出入，仅供量级参考。" : "The DeepSeek line is a what-if: the same uncached, cached and output tokens at DeepSeek V4.1 Flash list prices, from off-peak to weekday peak (double). Tokenizers differ, so the same work would not use exactly these token counts there."}</p>
           <p>{zh ? "金额优先使用自己的或共享空间的价格表，没有配置时使用 App 自带的参考价格；也会保留兼容的历史估算。它不是订阅实际扣费，也不是官方剩余额度。" : "Costs prefer your own or shared-space catalog, falling back to built-in reference prices and compatible historical estimates. They are not subscription charges or remaining quota."}</p>
           <p>{zh ? "日账与时段汇总不重复累加。仅在时间边界匹配时使用汇总；本周不等于近7天。离线设备保留截至快照时的统计。" : "Daily ledgers and range totals are never added twice. Ranges require matching date bounds; this week is not rolling seven days. Offline totals stop at their snapshot time."}</p>
           {view === "models" && <p>{zh ? "颜色按GPT数字代际从新到旧等间隔取红到蓝；同代按名称固定排序。隐藏或代际不明的模型为灰色；展开更多时重新均分色带。仅有名称的旧快照按原名称汇总，不猜测具体变体。" : "Visible GPT generations are spaced evenly from new/red to old/blue, with name-based ties. Hidden or unversioned models are gray; expanding resamples the palette. Name-only legacy rows stay name-grouped without guessing variants."}</p>}

@@ -386,6 +386,7 @@ impl Pricing {
         // Existing catalog entries and local overrides take precedence.
         for (id, input, cache_read, output) in [
             ("openai/gpt-6.1-sol", 2.0, 0.10, 10.0),
+            ("openai/gpt-6.1-terra", 1.0, 0.05, 5.0),
             ("openai/gpt-6-astra", 10.0, 1.0, 50.0),
             ("openai/gpt-6-sol", 2.0, 0.20, 10.0),
             ("openai/gpt-6-luna", 0.10, 0.01, 0.50),
@@ -2827,6 +2828,7 @@ mod tests {
         };
         for (model, expected) in [
             ("gpt-6.1-sol", 0.505),
+            ("gpt-6.1-terra", 0.2525),
             ("gpt-6-astra", 2.55),
             ("gpt-6-sol", 0.51),
             ("gpt-6-luna", 0.0255),
