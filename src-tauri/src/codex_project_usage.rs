@@ -372,6 +372,9 @@ struct Pricing {
     meta: Option<PricingMeta>,
     #[serde(skip)]
     origin: PricingOrigin,
+    /// The user's own prices (Settings → custom model prices), checked first.
+    #[serde(skip)]
+    custom: Vec<(String, Rate)>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct PricingMeta {
@@ -540,7 +543,46 @@ impl Pricing {
         let pricing = Self::sanitize_catalog(Self::load(home, None))?;
         serde_json::to_value(pricing).ok()
     }
+    /// Load the user's custom prices kept next to the app catalog.
+    fn apply_custom(&mut self, app_catalog: Option<&Path>) {
+        self.custom = app_catalog
+            .and_then(Path::parent)
+            .map(|dir| crate::custom_prices::read(&dir.join(crate::custom_prices::FILE)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.model,
+                    Rate {
+                        input: Some(entry.input),
+                        output: Some(entry.output),
+                        cache_read: Some(entry.cache_read),
+                        canonical_slug: None,
+                    },
+                )
+            })
+            .collect();
+    }
+    fn custom_rate(&self, model: &str) -> Option<&Rate> {
+        let id = crate::custom_prices::normalize(model);
+        self.custom
+            .iter()
+            .find(|(key, _)| *key == id)
+            .or_else(|| {
+                self.custom
+                    .iter()
+                    .filter(|(key, _)| {
+                        key.strip_suffix('*')
+                            .is_some_and(|prefix| id.starts_with(prefix))
+                    })
+                    .max_by_key(|(key, _)| key.len())
+            })
+            .map(|(_, rate)| rate)
+    }
     fn rate(&self, model: &str) -> Option<&Rate> {
+        if let Some(rate) = self.custom_rate(model) {
+            return Some(rate);
+        }
         let key = self.aliases.get(model).map(String::as_str).unwrap_or(model);
         self.models
             .get(key)
@@ -1431,6 +1473,7 @@ struct PricingKey {
     path: Option<PathBuf>,
     length: Option<u64>,
     modified: Option<SystemTime>,
+    custom: (Option<u64>, Option<SystemTime>),
 }
 impl PricingKey {
     fn from_path(path: Option<&Path>) -> Self {
@@ -1439,6 +1482,7 @@ impl PricingKey {
                 path: None,
                 length: None,
                 modified: None,
+                custom: (None, None),
             };
         };
         let metadata = fs::metadata(path).ok();
@@ -1446,6 +1490,10 @@ impl PricingKey {
             path: Some(path.to_path_buf()),
             length: metadata.as_ref().map(fs::Metadata::len),
             modified: metadata.and_then(|m| m.modified().ok()),
+            custom: path
+                .parent()
+                .map(|dir| crate::custom_prices::file_key(&dir.join(crate::custom_prices::FILE)))
+                .unwrap_or((None, None)),
         }
     }
 }
@@ -1541,6 +1589,7 @@ fn collect_increment_with_catalog(
             *index = Index::default();
         }
         index.collector.pricing = Pricing::load(home, app_catalog);
+        index.collector.pricing.apply_custom(app_catalog);
         index.pricing_key = Some(pricing_key.clone());
     }
     // Truncation/replacement invalidates cumulative baselines; rebuild safely.
@@ -1551,6 +1600,7 @@ fn collect_increment_with_catalog(
     {
         *index = Index::default();
         index.collector.pricing = Pricing::load(home, app_catalog);
+        index.collector.pricing.apply_custom(app_catalog);
         index.pricing_key = Some(pricing_key);
         index.collector.warnings.insert("source_reindexed".into());
     }
@@ -2810,6 +2860,45 @@ mod tests {
         );
         fs::remove_dir_all(temp).unwrap();
     }
+    #[test]
+    fn custom_prices_take_precedence_and_cover_unknown_models() {
+        let home = metadata_fixture_dir("custom-pricing");
+        let data = home.join("app");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(
+            data.join(crate::custom_prices::FILE),
+            r#"{"models":[{"model":"gpt-6.1-sol","input":1,"cacheRead":0,"output":0},{"model":"gpt-7*","input":3,"cacheRead":0,"output":0}]}"#,
+        )
+        .unwrap();
+        let catalog = data.join("usage-prices.json");
+        let before = PricingKey::from_path(Some(&catalog));
+        let mut pricing = Pricing::load(&home, Some(&catalog));
+        pricing.apply_custom(Some(&catalog));
+        let counts = Counts {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        assert!(
+            (pricing
+                .estimate("openai/gpt-6.1-sol", counts, None)
+                .unwrap()
+                - 1.0)
+                .abs()
+                < 1e-10
+        );
+        assert!((pricing.estimate("gpt-7-terra", counts, None).unwrap() - 3.0).abs() < 1e-10);
+        assert!(pricing.estimate("gpt-8", counts, None).is_none());
+        // Exporting a shared catalog never includes the user's own prices.
+        assert!(shared_pricing_export(&home, &catalog).unwrap()["models"]
+            .get("gpt-7*")
+            .is_none());
+        fs::write(data.join(crate::custom_prices::FILE), r#"{"models":[]}"#).unwrap();
+        assert!(PricingKey::from_path(Some(&catalog)) != before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn fresh_install_prices_supported_models_without_legacy_or_sync() {
         let home = metadata_fixture_dir("fresh-pricing");

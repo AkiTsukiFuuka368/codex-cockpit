@@ -3816,3 +3816,16 @@ textarea {
 .claude-price-table th:first-child, .claude-price-table td:first-child { text-align: left; white-space: normal; }
 .claude-price-table th { color: var(--glass-muted, #9babbc); font-weight: 600; }
 .claude-price-table small { color: var(--glass-muted, #9babbc); }
+
+/* Settings → custom model prices */
+.custom-prices-hint, .custom-prices-missing { margin: 6px 0 8px; font-size: 12px; line-height: 1.5; opacity: 0.8; }
+.custom-prices-missing .usage-text-button { margin: 2px 6px 2px 0; }
+.custom-prices-table { display: grid; gap: 4px; }
+.custom-prices-table > div { display: grid; grid-template-columns: minmax(0, 2.2fr) repeat(4, minmax(0, 1fr)) 24px; gap: 4px; align-items: center; }
+.custom-prices-head span { font-size: 11px; opacity: 0.7; }
+.custom-prices-table input { min-width: 0; width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; padding: 4px 6px; border-radius: 6px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); background: transparent; color: inherit; }
+.custom-prices-invalid input { border-color: #d9534f; }
+.custom-prices-table button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 15px; opacity: 0.6; }
+.custom-prices-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; }
+.app-update-status { margin: 6px 0 4px; font-size: 12px; line-height: 1.5; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.app-update-status progress { width: 120px; }

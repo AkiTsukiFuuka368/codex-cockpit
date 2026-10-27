@@ -325,7 +325,7 @@ export default function App() {
       });
       if (updateSequence.current === sequence) {
         setUpdateState({ phase: "ready", info, progress: { downloadedBytes: 0, totalBytes: 0, percent: 100 }, error: null });
-        setUpdateOpen(true);
+        if (!controlOpenRef.current) setUpdateOpen(true);
       }
     } catch (error) {
       if (updateSequence.current !== sequence) return;
@@ -336,9 +336,12 @@ export default function App() {
   }, [t.updateFailed]);
 
   const checkUpdate = useCallback((manual = false) => {
+    // From the control center the status shows inline in Settings; the floating
+    // update panel is only for the widget itself.
+    const reveal = manual && !controlOpenRef.current;
     if (["downloading", "installing"].includes(updateState.phase) ||
         (["available", "ready"].includes(updateState.phase) && updateState.info?.channel === preferences.updateChannel)) {
-      if (manual) {
+      if (reveal) {
         setDiagnosticsOpen(false);
         setUpdateOpen(true);
       }
@@ -346,8 +349,10 @@ export default function App() {
     }
     const sequence = ++updateSequence.current;
     if (manual) {
-      setDiagnosticsOpen(false);
-      setUpdateOpen(true);
+      if (reveal) {
+        setDiagnosticsOpen(false);
+        setUpdateOpen(true);
+      }
       setUpdateState({ phase: "checking", info: null, progress: null, error: null });
     }
     setOperationError(null);
@@ -364,15 +369,15 @@ export default function App() {
       }
       if (!info.automaticInstall || manual || !preferences.automaticUpdates) {
         setUpdateState({ phase: "available", info, progress: null, error: null });
-        if (!manual) setUpdateOpen(true);
+        if (!manual && !controlOpenRef.current) setUpdateOpen(true);
         return;
       }
-      await startUpdateDownload(info, manual);
+      await startUpdateDownload(info, reveal);
     }).catch((error) => {
       if (updateSequence.current !== sequence) return;
       setUpdateState({ phase: "error", info: null, progress: null, error: errorMessage(error, t.updateFailed) });
       setOperationError(t.updateFailed);
-      if (manual) setUpdateOpen(true);
+      if (reveal) setUpdateOpen(true);
     });
   }, [preferences.automaticUpdates, preferences.skippedUpdateVersion, preferences.updateChannel, startUpdateDownload, t.updateFailed, updateState.phase]);
 
@@ -757,14 +762,14 @@ export default function App() {
   }, [checkUpdate, closeControlSurface, updateState.phase]);
 
   const handleUpdateDownload = useCallback(() => {
-    if (updateState.info) void startUpdateDownload(updateState.info, true);
+    if (updateState.info) void startUpdateDownload(updateState.info, !controlOpenRef.current);
   }, [startUpdateDownload, updateState.info]);
 
   const handleUpdateInstall = useCallback(() => {
     const info = updateState.info;
     if (!info) return;
     ++updateSequence.current;
-    setUpdateOpen(true);
+    if (!controlOpenRef.current) setUpdateOpen(true);
     setUpdateState({ phase: "installing", info, progress: updateState.progress, error: null });
     void createAutomaticBackup({ schemaVersion: 1, createdAt: new Date().toISOString(), preferences, runtimeState: runtimeStateRef.current })
       .then(() => installAppUpdate())
@@ -1223,7 +1228,11 @@ export default function App() {
           onComfortPersonChange={handleComfortPersonChange}
           onComfortSnapshotRefresh={handleComfortSnapshotRefresh}
           onUsageGroupsChange={refreshComfortUsage}
-          onCheckUpdate={() => void handleUpdateOpen()}
+          onCheckUpdate={() => checkUpdate(true)}
+          updateState={updateState}
+          onUpdateDownload={handleUpdateDownload}
+          onUpdateInstall={handleUpdateInstall}
+          onUpdateRelease={handleUpdateRelease}
           onClose={() => {
             void closeControlSurface().catch(() => setOperationError("Control center close failed."));
           }}

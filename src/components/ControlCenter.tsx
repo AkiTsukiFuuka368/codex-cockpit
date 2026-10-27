@@ -17,6 +17,9 @@ import { ProviderMark } from "./ProviderMark";
 import { TeamMemberSettings } from "./TeamMemberSettings";
 import { CloudSyncSettings } from "./CloudSyncSettings";
 import { LocalUsageSourceSettings } from "./LocalUsageSourceSettings";
+import { CustomPricesSettings } from "./CustomPricesSettings";
+import type { UpdateViewState } from "./UpdatePanel";
+import { isTauri } from "../lib/bridge";
 
 interface Props {
   preferences: WidgetPreferences;
@@ -37,6 +40,10 @@ interface Props {
   onComfortSnapshotRefresh?: (localDate: string) => void;
   onUsageGroupsChange?: () => Promise<unknown> | void;
   onCheckUpdate?: () => void;
+  updateState?: UpdateViewState;
+  onUpdateDownload?: () => void;
+  onUpdateInstall?: () => void;
+  onUpdateRelease?: () => void;
   onClose: () => void;
   onRefresh: () => void;
   onOpenCodexResets?: () => void;
@@ -47,7 +54,7 @@ interface Props {
   onAutostart: (enabled: boolean) => void;
 }
 
-export function ControlCenter({ preferences, language, comfortFeedback = [], dailyUsage = [], dailyUsageHistory = [], dailyRecommendation = null, weeklyRemainingPercent = null, carryInPercent = 0, onComfortFeedback = () => undefined, comfortUsage = null, comfortPersonId = null, comfortUsageError = false, comfortSaving = false, comfortSaveError = null, onComfortPersonChange = () => undefined, onComfortSnapshotRefresh = () => undefined, onUsageGroupsChange = () => undefined, onCheckUpdate = () => undefined, onClose, onRefresh, onOpenCodexResets = () => undefined, onDrag = () => undefined, onPreferences, onSliderInteraction = () => undefined, autostartEnabled, onAutostart }: Props) {
+export function ControlCenter({ preferences, language, comfortFeedback = [], dailyUsage = [], dailyUsageHistory = [], dailyRecommendation = null, weeklyRemainingPercent = null, carryInPercent = 0, onComfortFeedback = () => undefined, comfortUsage = null, comfortPersonId = null, comfortUsageError = false, comfortSaving = false, comfortSaveError = null, onComfortPersonChange = () => undefined, onComfortSnapshotRefresh = () => undefined, onUsageGroupsChange = () => undefined, onCheckUpdate = () => undefined, updateState, onUpdateDownload = () => undefined, onUpdateInstall = () => undefined, onUpdateRelease = () => undefined, onClose, onRefresh, onOpenCodexResets = () => undefined, onDrag = () => undefined, onPreferences, onSliderInteraction = () => undefined, autostartEnabled, onAutostart }: Props) {
   const dialogRef = useModalDialog<HTMLElement>(onClose);
   const selectedPersonCurve = useMemo(() => personalizeComfortCurve(
     comfortFeedback.filter(record => (record.personId ?? null) === comfortPersonId)
@@ -238,13 +245,15 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
         </section>
 
         <section className="minimal-section">
-          <header className="minimal-section-header"><strong>{zh ? "应用更新" : "App updates"}</strong><button type="button" onClick={onCheckUpdate}>{zh ? "检查更新" : "Check for updates"}</button></header>
+          <header className="minimal-section-header"><strong>{zh ? "应用更新" : "App updates"}</strong><button type="button" disabled={updateState?.phase === "checking" || updateState?.phase === "installing"} onClick={onCheckUpdate}>{zh ? "检查更新" : "Check for updates"}</button></header>
+          <AppUpdateStatus zh={zh} state={updateState} onDownload={onUpdateDownload} onInstall={onUpdateInstall} onRelease={onUpdateRelease} />
           <label className="minimal-toggle-row"><span>{zh ? "版本通道" : "Release channel"}</span><select aria-label={zh ? "版本通道" : "Release channel"} value={preferences.updateChannel} onChange={event => updatePreferences({ updateChannel: event.target.value === "beta" ? "beta" : "stable", skippedUpdateVersion: null })}><option value="stable">{zh ? "正式版" : "Stable"}</option><option value="beta">{zh ? "测试版" : "Beta"}</option></select></label>
           <label className="minimal-toggle-row">
             <span><strong>{zh ? "自动下载更新" : "Download updates automatically"}</strong><small>{zh ? "后台检查并下载，准备好后提醒你重启安装。" : "Checks in the background and asks you to restart when ready."}</small></span>
             <span className="switch"><input type="checkbox" aria-label={zh ? "自动下载更新" : "Download updates automatically"} checked={preferences.automaticUpdates} onChange={event => updatePreferences({ automaticUpdates: event.target.checked })} /><i /></span>
           </label>
         </section>
+        <CustomPricesSettings zh={zh} />
         <footer className="minimal-footer"><span>{labels.source}</span><button type="button" onClick={onClose}>{labels.done}</button></footer>
         </div> : <>
         <section className="minimal-status-card" aria-label={labels.status}>
@@ -277,4 +286,36 @@ export function ControlCenter({ preferences, language, comfortFeedback = [], dai
       <aside className="usage-calendar control-calendar-side" ref={setCalendarPortalTarget} aria-label={zh ? "日历侧栏" : "Calendar side panel"} />
     </section>
   );
+}
+
+/** Update progress shown in Settings, so checking never leaves the control center. */
+function AppUpdateStatus({ zh, state, onDownload, onInstall, onRelease }: { zh: boolean; state?: UpdateViewState; onDownload: () => void; onInstall: () => void; onRelease: () => void }) {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    void import("@tauri-apps/api/app").then(app => app.getVersion()).then(value => { if (active) setVersion(value); }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+  const next = state?.info?.version;
+  const percent = state?.progress?.percent;
+  const text = !state || state.phase === "idle"
+    ? null
+    : state.phase === "checking" ? (zh ? "正在检查…" : "Checking…")
+    : state.phase === "current" ? (zh ? "已是最新版本。" : "You're up to date.")
+    : state.phase === "available" ? (zh ? `发现新版本 ${next}。` : `Version ${next} is available.`)
+    : state.phase === "downloading" ? (zh ? `正在下载 ${next}${percent != null ? `（${Math.round(percent)}%）` : ""}…` : `Downloading ${next}${percent != null ? ` (${Math.round(percent)}%)` : ""}…`)
+    : state.phase === "ready" ? (zh ? `${next} 已下载好，重启即可安装。` : `${next} is ready; restart to install.`)
+    : state.phase === "installing" ? (zh ? "正在安装，驾驶舱会自动重启…" : "Installing; the app will restart…")
+    : (zh ? `检查更新失败：${state.error ?? "未知原因"}` : `Update failed: ${state.error ?? "unknown error"}`);
+  return <div className="app-update-status" role="status">
+    <span>{zh ? "当前版本" : "Current version"} {version ?? "—"}</span>
+    {text && <span>{text}</span>}
+    {state?.phase === "downloading" && <progress max={100} value={percent ?? undefined} />}
+    {state?.phase === "available" && (state.info?.automaticInstall
+      ? <button type="button" className="usage-text-button" onClick={onDownload}>{zh ? "下载" : "Download"}</button>
+      : <button type="button" className="usage-text-button" onClick={onRelease}>{zh ? "打开下载页" : "Open releases"}</button>)}
+    {state?.phase === "ready" && <button type="button" className="usage-text-button" onClick={onInstall}>{zh ? "重启并安装" : "Restart and install"}</button>}
+    {state?.phase === "error" && <button type="button" className="usage-text-button" onClick={onRelease}>{zh ? "打开下载页" : "Open releases"}</button>}
+  </div>;
 }

@@ -268,6 +268,20 @@ impl Tokens {
 
 /// Estimated API-equivalent cost of one request, or `None` for unknown models.
 pub fn request_cost(model: &str, tokens: &Tokens) -> Option<f64> {
+    if let Some(custom) = crate::custom_prices::lookup(model) {
+        let per = |count: u64, price: f64| count as f64 * price / 1_000_000.0;
+        let (write_5m, write_1h) = match custom.cache_write {
+            Some(write) => (write, write),
+            None => (custom.input * 1.25, custom.input * 2.0),
+        };
+        return Some(
+            per(tokens.input, custom.input)
+                + per(tokens.cache_write_5m, write_5m)
+                + per(tokens.cache_write_1h, write_1h)
+                + per(tokens.cache_read, custom.cache_read)
+                + per(tokens.output, custom.output),
+        );
+    }
     let entry = price_entry(model)?;
     let rate = match entry.long {
         Some((threshold, long)) if tokens.prompt() > threshold => long,
@@ -1265,7 +1279,7 @@ fn ledgers(roots: &[TranscriptRoot]) -> (Value, Value) {
     let mut task_projects: HashMap<Arc<str>, Arc<str>> = HashMap::new();
     let mut unpriced = false;
     for record in &result.records {
-        unpriced |= price_entry(&record.model).is_none();
+        unpriced |= request_cost(&record.model, &record.tokens).is_none();
         add_to(&mut device_ledger, record);
         add_to(
             project_ledgers.entry(record.project.clone()).or_default(),
@@ -1345,7 +1359,10 @@ fn claude_base() -> Option<PathBuf> {
 
 /// Token ledger for the Claude usage page (same shape as `get_tokei_usage`).
 #[tauri::command]
-pub async fn get_claude_tokei_usage() -> Result<Value, String> {
+pub async fn get_claude_tokei_usage(app: tauri::AppHandle) -> Result<Value, String> {
+    if let Some(dir) = crate::custom_prices::data_dir(&app) {
+        crate::custom_prices::refresh(&dir);
+    }
     tokio::task::spawn_blocking(|| ledgers(&transcript_roots()).0)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())
@@ -1353,7 +1370,10 @@ pub async fn get_claude_tokei_usage() -> Result<Value, String> {
 
 /// Projects and tasks for the Claude usage page (same shape as `get_codex_project_usage`).
 #[tauri::command]
-pub async fn get_claude_project_usage() -> Result<Value, String> {
+pub async fn get_claude_project_usage(app: tauri::AppHandle) -> Result<Value, String> {
+    if let Some(dir) = crate::custom_prices::data_dir(&app) {
+        crate::custom_prices::refresh(&dir);
+    }
     tokio::task::spawn_blocking(|| ledgers(&transcript_roots()).1)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())
@@ -1579,7 +1599,10 @@ fn read_setup() -> ClaudeSetup {
 }
 
 #[tauri::command]
-pub async fn get_claude_setup() -> Result<ClaudeSetup, String> {
+pub async fn get_claude_setup(app: tauri::AppHandle) -> Result<ClaudeSetup, String> {
+    if let Some(dir) = crate::custom_prices::data_dir(&app) {
+        crate::custom_prices::refresh(&dir);
+    }
     tokio::task::spawn_blocking(read_setup)
         .await
         .map_err(|_| "claude_usage_unavailable".to_string())

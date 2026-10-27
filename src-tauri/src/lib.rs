@@ -6,6 +6,7 @@ mod cloud_sync;
 mod codex;
 mod codex_project_usage;
 mod comfort_sync;
+mod custom_prices;
 mod local_usage;
 mod models;
 mod qoder;
@@ -3200,7 +3201,9 @@ pub fn run() {
             claude::get_claude_setup,
             claude::get_claude_tokei_usage,
             claude::get_claude_project_usage,
-            claude::install_claude_collector
+            claude::install_claude_collector,
+            custom_prices::get_custom_prices,
+            custom_prices::save_custom_prices
         ])
         .on_tray_icon_event(|app, event| {
             if let TrayIconEvent::Click {
